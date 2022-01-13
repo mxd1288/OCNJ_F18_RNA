@@ -1,0 +1,2943 @@
+---
+title: "OCNJ_F18_cDNA_DESeq"
+author: "Melissa Drown"
+date: "4/13/2021"
+output: html_document
+---
+
+
+```{r}
+library(tximport)
+library(GenomeInfoDb)
+library(DESeq2)
+library(tidyverse)
+library(dplyr)
+library(ComplexHeatmap)
+library(limma)
+library(edgeR)
+library(pheatmap)
+library(GenomicFeatures)
+library(reshape2)
+library(gridExtra)
+```
+# Read in the Data
+```{r}
+physio <- read.csv("cDNA_metadata_phenotypes.csv")
+meta <- read.csv("cDNA_F18_OCNJ_MKD_metadata.csv")
+counts <- read.csv("OCNJ_F18_counts_2lanes.csv")
+cam_groups <- read.csv("CaM_groups.csv")
+```
+# Initial Filtering
+```{r}
+head(meta)
+head(counts)
+
+length <- counts$length 
+
+data <- counts[ ,7:ncol(counts)]
+
+# filter out reads with count of 0
+# from 34686 to 24636 genes
+raw_counts<- data[rowSums(data) > 0,]
+
+read_depth <- colSums(data)
+hist(read_depth, breaks=20)
+
+counts_per_gene <- rowSums(data)
+hist(counts_per_gene, breaks=20)
+# 8113 counts per gene before filtering
+mean(counts_per_gene)
+
+raw_counts<- data[,colSums(data) > 1000000]
+sample_names_keep <-  colnames(raw_counts)
+
+hist(colSums(raw_counts))
+
+brain_counts1 <- data[ , grepl( "brain" , names( data ) ) ]
+heart_counts1 <- data[ , grepl( "heart" , names( data ) ) ]
+
+hist(colSums(heart_counts1)*2, breaks=20, col="thistle", main="Unfiltered Heart Sample Read Depth", xlab="Read Depth")
+abline(v = 1000000, col="red", lwd=3, lty=2)
+hist(colSums(brain_counts1)*2, breaks=20, col="lightblue", main="Unfiltered Brain Sample Read Depth", xlab="Read Depth")
+abline(v = 1000000, col="red", lwd=3, lty=2)
+
+# 1475901 
+mean(colSums(heart_counts1))
+# 1059400
+mean(colSums(brain_counts1))
+```
+
+
+# Add to metadata
+```{r, assign top substrate}
+# Assign top substrate
+physio[is.na(physio)] <- " "
+
+physio <- physio %>% mutate( 
+  top_substrate = ifelse(GLU.CamMass.Residuals > FA.CamMass.Residuals &
+         GLU.CamMass.Residuals > END.CamMass.Residuals &
+         GLU.CamMass.Residuals > LKA..CamMass.Residuals, "GLU",
+  ifelse(FA.CamMass.Residuals > GLU.CamMass.Residuals &
+         FA.CamMass.Residuals > END.CamMass.Residuals &
+           FA.CamMass.Residuals > LKA..CamMass.Residuals, "FA",
+  ifelse(LKA..CamMass.Residuals > GLU.CamMass.Residuals &
+           LKA..CamMass.Residuals > FA.CamMass.Residuals &
+           LKA..CamMass.Residuals > END.CamMass.Residuals, "LKA",
+  ifelse(END.CamMass.Residuals > GLU.CamMass.Residuals &
+           END.CamMass.Residuals > FA.CamMass.Residuals &
+           END.CamMass.Residuals > LKA..CamMass.Residuals, "END", "NA")
+))))
+
+```
+
+```{r, assign new groups}
+cam_groups <- cam_groups%>% mutate( 
+  new_group = ifelse(group.ID =="group1", "G1",
+  ifelse(group.ID=="group2", "G1",
+  ifelse(group.ID=="group3", "G2",
+  ifelse(group.ID=="group4", "G2",
+  ifelse(group.ID=="group5", "G2","NA")
+)))))
+```
+
+```{r, include=FALSE}
+physio <- left_join(physio, cam_groups, by="sample.ID")
+meta_all <- physio[,c(2,5,6,7,8,9,10,13,14,17,23,37:39)]
+
+meta_all_unique <- meta_all %>% distinct()
+meta_all_unique <- subset(meta_all_unique, meta_all_unique$Sex!="")
+```
+
+# Subset by tissue 
+```{r}
+counts <- read.csv("OCNJ_F18_counts_2lanes.csv")
+rownames(counts) <- counts$Geneid
+counts <- counts[ ,7:ncol(counts)]
+counts <- counts[,colSums(counts) > 1000000]
+
+# started with 34686 -> non zero = 24636
+brain_counts <- counts[ , grepl( "brain" , names( raw_counts ) ) ]
+heart_counts <- counts[ , grepl( "heart" , names( raw_counts ) ) ]
+
+# keep only genes with at least 10 counts in at least 90% of individuals 
+0.9*(ncol(heart_counts)) #72
+0.9*(ncol(brain_counts)) #52
+
+heart_counts <- heart_counts[,colSums(heart_counts) > 1500000]
+```
+
+```{r}
+## Check our fc_meta lengths
+nrow(meta_all_unique) # 408
+
+brain_meta <- subset(meta_all_unique, meta_all_unique$tissue =="brain")  
+heart_meta <- subset(meta_all_unique, meta_all_unique$tissue =="heart") 
+
+brain_meta <- subset(brain_meta, brain_meta$top_substrate!="NA")
+heart_meta <- subset(heart_meta, heart_meta$top_substrate!="NA")
+fc_meta <- subset(meta_all_unique, meta_all_unique$top_substrate!="NA")
+
+nrow(brain_meta) #109
+nrow(heart_meta) #109
+nrow(fc_meta) #218
+
+rownames(fc_meta) <- fc_meta$sample.ID
+rownames(heart_meta) <- heart_meta$sample.ID
+rownames(brain_meta) <- brain_meta$sample.ID
+
+fc_meta <- subset(fc_meta, rownames(fc_meta) %in% colnames(counts))
+rownames(fc_meta) %in% colnames(counts)
+
+heart_meta <- subset(heart_meta, rownames(heart_meta) %in% colnames(heart_counts))
+rownames(heart_meta) %in% colnames(heart_counts)
+
+brain_meta <- subset(brain_meta, rownames(brain_meta) %in% colnames(brain_counts))
+rownames(brain_meta) %in% colnames(brain_counts)
+```
+
+```{r}
+# REORDER COLUMNS TO MATCH METADATA
+# all data
+raw_counts <- counts[,unique(rownames(fc_meta))]
+rownames(fc_meta)==colnames(raw_counts)
+
+# reorder heart counts
+heart_counts <- heart_counts[,unique(rownames(heart_meta))]
+rownames(heart_meta)==colnames(heart_counts)
+
+# reorder brain counts
+brain_counts <- brain_counts[,unique(rownames(brain_meta))]
+rownames(brain_meta)==colnames(brain_counts)
+```
+
+# Set up DESeq Objects - initial visualization
+```{r}
+all_counts_dds <- DESeqDataSetFromMatrix(countData = raw_counts,  colData =fc_meta , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+
+brain_counts_dds <- DESeqDataSetFromMatrix(countData = brain_counts,  colData =brain_meta , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+
+heart_counts_dds <- DESeqDataSetFromMatrix(countData = heart_counts,  colData =heart_meta , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+
+# VST 
+all_counts_vst <- vst(all_counts_dds, blind=TRUE)
+brain_counts_vst <- vst(brain_counts_dds, blind=TRUE)
+heart_counts_vst <- vst(heart_counts_dds, blind=TRUE)
+```
+# Make PCA
+```{r}
+all_PCA_data <- plotPCA(all_counts_vst, intgroup=c("tissue", "Habitat.temp","Sex","Population", "Cam.Temp"), returnData=TRUE, ntop=500)
+
+plotPCA(all_counts_vst, intgroup=c("tissue","Cam.Temp"), ntop=500)
+
+plotPCA(heart_counts_vst, intgroup="Cam.Temp") + geom_text(aes(label=heart_counts_vst$sample.ID),vjust=2)
+
+plotPCA(brain_counts_vst, intgroup="Cam.Temp") + geom_text(aes(label=brain_counts_vst$sample.ID),vjust=2)
+
+ggplot(data=all_PCA_data, aes(x=PC1, y=PC2, col=tissue, shape=Cam.Temp)) +
+  geom_point(aes(size=1)) +
+  scale_color_manual(values=c("darkgrey", "darkred")) + 
+  stat_ellipse() + xlab("PC1 - 86%") + ylab("PC2 - 1%") +
+  theme_bw()
+```
+# Filter Samples -- remove outlier hearts
+```{r}
+# Remove select hearts -- grouping with brains, unknown IDs
+# O2P4P5, R2P3G4, G1R4O6, R1R4R6, G1G2G6, O1R4G5, O2O3G5, R1O2P5, O1G2G5, P3O5O6, P3O4R6
+
+hearts_rmv <- c("P3O4R6", "P3O5O6","O1G2G5","R1O2P5","R1R4R6","G1G2G6","O2P4P5","R2P3G4","G1R4O6","O1R4G5","O2O3G5","P2G4P5")
+
+# 42 remain
+heart_counts2 <- heart_counts[!grepl(paste(hearts_rmv, collapse = "|"), names( heart_counts))]
+
+# subset metadata
+dge_hts <- DGEList(heart_counts2)
+heart_keep <- colnames(heart_counts2)
+heart_meta2 <- heart_meta %>% filter(sample.ID %in% heart_keep)
+heart_meta2$Habitat.temp <- as.factor(heart_meta2$Habitat.temp)
+# Reorder columns
+col_order_hearts <- colnames(heart_counts2)
+rownames(heart_meta2) <- heart_meta2$sample.ID
+heart_meta2 <- heart_meta2[col_order_hearts, ]
+
+all(rownames(heart_meta2)==colnames(heart_counts2))
+rownames(heart_meta2)==colnames(heart_counts2)
+```
+```{r}
+# New Heart PCA
+heart_counts_dds_2 <- DESeqDataSetFromMatrix(countData = heart_counts2,  colData =heart_meta2 , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+heart_counts_vst_2 <- vst(heart_counts_dds_2, blind=TRUE)
+
+# customize PCA
+plotPCA(heart_counts_vst_2, intgroup=c("Cam.Temp"), returnData=FALSE)
+#pcaaxes23(heart_counts_vst_2, intgroup=c("Habitat.temp"), returnData=FALSE)
+#pcaaxes34(heart_counts_vst_2, intgroup=c("Habitat.temp"), returnData=FALSE)
+
+pcaData_H2 <- plotPCA(heart_counts_vst_2, intgroup=c("Habitat.temp","Cam.Temp","Population","Sex"), returnData=TRUE)
+percentVar_H2 <- round(100 * attr(pcaData_H2, "percentVar"))
+ggplot(pcaData_H2, aes(PC1, PC2, color=Population, shape=Cam.Temp)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar_H2[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar_H2[2],"% variance")) + 
+  coord_fixed() +
+  scale_color_manual(values=c("blue","red","purple")) +
+  theme_bw()
+
+# for future use
+heart_counts_dds2 <- DESeqDataSetFromMatrix(countData = heart_counts2,  colData =heart_meta2 , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+heart_counts_vst2 <- vst(heart_counts_dds_2, blind=TRUE)
+```
+# Filter samples - remove select brains
+```{r}
+# Remove select brains -- grouping with hearts and outliers
+# P2G5G6, G2O3R5, G3G4R5, O1R4P5, P1G5O6, P1G5P6
+
+brains_rmv <- c("P1G5P6","O1R4P5", "P2G5G6","G2O3R5","G3G4R5", "P1G5O6", "R1P3O4","P1G2R3", "O1O3R4", "R3O4O6", "O1O2R5", "G2G3R5", "G2G3O5")
+
+# 45 remain
+brain_counts2 <- brain_counts[!grepl(paste(brains_rmv, collapse = "|"), names( brain_counts))]
+
+# subset metadata
+dge_brn <- DGEList(brain_counts2)
+brain_keep <- colnames(brain_counts2)
+brain_meta2 <- brain_meta %>% filter(sample.ID %in% brain_keep)
+brain_meta2$Habitat.temp <- as.factor(brain_meta2$Habitat.temp)
+# Reorder columns
+col_order_brains <- colnames(brain_counts2)
+rownames(brain_meta2) <- brain_meta2$sample.ID
+brain_meta2 <- brain_meta2[col_order_brains, ]
+
+all(rownames(brain_meta2)==colnames(brain_counts2))
+rownames(brain_meta2)==colnames(brain_counts2)
+```
+```{r}
+# New Brain PCA
+brain_counts_dds_2 <- DESeqDataSetFromMatrix(countData = brain_counts2,  colData =brain_meta2 , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+brain_counts_vst_2 <- vst(brain_counts_dds_2, blind=TRUE)
+
+# customize PCA
+plotPCA(brain_counts_vst_2, intgroup=c("Sex"), returnData=FALSE)
+#pcaaxes23(brain_counts_vst_2, intgroup=c("Habitat.temp"), returnData=FALSE)
+#pcaaxes34(brain_counts_vst_2, intgroup=c("Habitat.temp"), returnData=FALSE)
+
+pcaData_H3 <- plotPCA(brain_counts_vst_2, intgroup=c("Habitat.temp","Cam.Temp","Population","Sex"), returnData=TRUE)
+percentVar_H3 <- round(100 * attr(pcaData_H3, "percentVar"))
+ggplot(pcaData_H3, aes(PC1, PC2, color=Population, shape=Cam.Temp)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar_H3[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar_H3[2],"% variance")) + 
+  scale_color_manual(values=c("blue","red","purple")) +
+  theme_bw()
+
+# for future use
+brain_counts_dds2 <- DESeqDataSetFromMatrix(countData = brain_counts2,  colData =brain_meta2 , design = ~ Cam.Temp + Population + Cam.Temp:Population)
+brain_counts_vst2 <- vst(brain_counts_dds_2, blind=TRUE)
+
+```
+
+```{r}
+# what is being plotted on PCA
+pca_vars <- rowVars(assay(all_counts_vst))
+pca_vars<-as.data.frame(pca_vars)
+pca_vars$gene_ID <- rownames(all_counts_vst)
+rownames(pca_vars) <- rownames(all_counts_vst)
+
+select_rows <- order(pca_vars$pca_vars, decreasing=TRUE)[1:500]
+pca_IDs <- pca_vars[select_rows, ]
+pca_IDs
+
+pca_brain_IDs <- subset(pca_IDs, pca_IDs$gene_ID %in% rownames(brain_counts_dds2))
+pca_heart_IDs <-subset(pca_IDs, pca_IDs$gene_ID %in% rownames(heart_counts_dds2))
+
+nrow(pca_brain_IDs) #474
+nrow(pca_heart_IDs) #217
+pca_brain_IDs
+pca_heart_IDs
+
+subset(pca_brain_IDs, pca_brain_IDs$gene_ID %in% rownames(pca_heart_IDs)) #191
+```
+
+```{r}
+# normalize counts for visualization
+all_norm_factors <-  calcNormFactors(all_counts_dds, method="TMM")
+logCPM_all <- cpm(all_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v SOC
+all_pca_top <- subset(all_counts_dds, rownames(all_counts_dds) %in% rownames(pca_IDs))
+
+nrow(all_pca_top) #top 500 most variable
+
+all_top_list <- rownames(all_pca_top)
+
+all_top_mat <- subset(logCPM_all, rownames(logCPM_all) %in% all_top_list)
+
+mat = as.matrix(scale(t(all_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(all_top_mat)
+colnames(mat) = colnames(all_top_mat)
+
+column_ha = HeatmapAnnotation( tissue = fc_meta$tissue, col=list(tissue=c("heart" = "maroon", "brain"="darkgrey")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, column_names_gp =gpar(fontsize=12), row_names_gp =gpar(fontsize=5), column_names_rot = 45)
+
+```
+```{r}
+hist(colSums(heart_counts2), breaks=40, col="maroon", main="Filtered Heart Sample Read Depth", xlab="Read Depth")
+hist(colSums(brain_counts2), breaks=40, col="lightblue", main="Filtered Brain Sample Read Depth", xlab="Read Depth")
+
+```
+# Set up DESeq Objects
+```{r}
+brain_counts_dds2 <- DESeqDataSetFromMatrix(countData = brain_counts2,  colData =brain_meta2 , design = ~ Population*Cam.Temp)
+
+heart_counts_dds2 <- DESeqDataSetFromMatrix(countData = heart_counts2,  colData =heart_meta2 , design = ~ Population*Cam.Temp)
+
+
+# pre-filter low counts
+heart_keep<- rowSums(counts(heart_counts_dds2)>=30) >= (0.1*ncol(heart_counts))
+heart_counts_dds2 <- heart_counts_dds2[heart_keep,]
+nrow(heart_counts_dds2)
+
+brain_keep<- rowSums(counts(brain_counts_dds2)>=30) >= (0.1*ncol(brain_counts))
+brain_counts_dds2 <- brain_counts_dds2[brain_keep,]
+nrow(brain_counts_dds2)
+
+ncol(heart_counts2)
+ncol(brain_counts2)
+```
+
+```{r}
+#Save filtered lists
+#write.csv(heart_counts2, "heart_counts_filtered.csv")
+#write.csv(brain_counts2, "brain_counts_filtered.csv")
+```
+
+# Differential Expression
+```{r}
+# set up variables for DGE testing
+heart_counts_dds2$Cam.Temp <- factor(heart_counts_dds2$Cam.Temp, levels = c("12","28"))
+heart_counts_dds2$Population <- factor(heart_counts_dds2$Population, levels = c("OCE","NOC", "SOC"))
+
+brain_counts_dds2$Cam.Temp <- factor(brain_counts_dds2$Cam.Temp, levels = c("12","28"))
+brain_counts_dds2$Population <- factor(brain_counts_dds2$Population, levels = c("OCE","NOC", "SOC"))
+
+nrow(heart_counts_dds2)
+nrow(brain_counts_dds2)
+
+ncol(heart_counts_dds2)
+ncol(brain_counts_dds2)
+
+# build DGE lists 
+# Conditions previously set to Cam.Temp + Population + Cam.Temp:Population for brain
+dds_dge_heart <- DESeq(heart_counts_dds2)
+dds_dge_brain <- DESeq(brain_counts_dds2)
+
+# extract DGE results
+heart_names <- resultsNames(dds_dge_heart)
+brain_names <- resultsNames(dds_dge_brain)
+
+heart_names
+brain_names
+```
+
+```{r}
+# differences among populations within accl. temperature
+heart_meta_12 <- subset(heart_meta2, heart_meta2$Cam.Temp=="12")
+names_meta_12 <- heart_meta_12$sample.ID
+heart_counts_12 <- heart_counts2[,colnames(heart_counts2) %in% names_meta_12]
+
+heart_meta_28 <- subset(heart_meta2, heart_meta2$Cam.Temp=="28")
+names_meta_28 <- heart_meta_28$sample.ID
+heart_counts_28 <- heart_counts2[,colnames(heart_counts2) %in% names_meta_28]
+
+brain_meta_12 <- subset(brain_meta2, brain_meta2$Cam.Temp=="12")
+names_brain_meta_12 <- brain_meta_12$sample.ID
+brain_counts_12 <- brain_counts2[,colnames(brain_counts2) %in% names_brain_meta_12]
+
+brain_meta_28 <- subset(brain_meta2, brain_meta2$Cam.Temp=="28")
+names_brain_meta_28 <- brain_meta_28$sample.ID
+brain_counts_28 <- brain_counts2[,colnames(brain_counts2) %in% names_brain_meta_28]
+
+# filter to original gene set
+brain_counts_12 <- subset(brain_counts_12, rownames(brain_counts_12) %in% rownames(brain_counts_dds2))
+nrow(brain_counts_12)
+
+brain_counts_28 <- subset(brain_counts_28, rownames(brain_counts_28) %in% rownames(brain_counts_dds2))
+nrow(brain_counts_28)
+
+heart_counts_12 <- subset(heart_counts_12, rownames(heart_counts_12) %in% rownames(heart_counts_dds2))
+nrow(heart_counts_12)
+
+heart_counts_28 <- subset(heart_counts_28, rownames(heart_counts_28) %in% rownames(heart_counts_dds2))
+nrow(heart_counts_28)
+
+# Make DESeq Data Sets
+brain_counts_dds2_12 <- DESeqDataSetFromMatrix(countData = brain_counts_12,  colData =brain_meta_12 , design = ~ Population)
+
+heart_counts_dds2_12 <- DESeqDataSetFromMatrix(countData = heart_counts_12,  colData =heart_meta_12 , design = ~Population)
+
+brain_counts_dds2_28 <- DESeqDataSetFromMatrix(countData = brain_counts_28,  colData =brain_meta_28 , design = ~ Population)
+
+heart_counts_dds2_28 <- DESeqDataSetFromMatrix(countData = heart_counts_28,  colData =heart_meta_28 , design = ~Population)
+
+
+ncol(heart_counts_12) #19
+ncol(brain_counts_12) #28
+ncol(heart_counts_28) #22
+ncol(brain_counts_28) #17
+```
+
+```{r}
+dds_dge_heart_12 <- DESeq(heart_counts_dds2_12)
+dds_dge_brain_12 <- DESeq(brain_counts_dds2_12)
+dds_dge_heart_28 <- DESeq(heart_counts_dds2_28)
+dds_dge_brain_28 <- DESeq(brain_counts_dds2_28)
+
+
+# extract DGE results
+heart_names_12 <- resultsNames(dds_dge_heart_12)
+brain_names_12 <- resultsNames(dds_dge_brain_12)
+heart_names_28 <- resultsNames(dds_dge_heart_28)
+brain_names_28 <- resultsNames(dds_dge_brain_28)
+
+heart_names_12
+brain_names_12
+heart_names_28
+brain_names_28
+```
+
+```{r}
+# Extract tables of results
+# Heart
+# temp within population
+heart_temp_DGE <- results(dds_dge_heart, name = "Cam.Temp_28_vs_12",pAdjustMethod = "BH", alpha=0.05)
+summary(heart_temp_DGE)
+
+heart_temp_NOC_DGE <- results(dds_dge_heart, list(c("Cam.Temp_28_vs_12","PopulationNOC.Cam.Temp28")) ,pAdjustMethod = "BH", alpha=0.05)
+summary(heart_temp_NOC_DGE)
+
+# effect of temp for SOC pop
+heart_temp_SOC_DGE <- results(dds_dge_heart, list(c("Cam.Temp_28_vs_12","PopulationSOC.Cam.Temp28")),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_temp_SOC_DGE)
+
+# genes that differentiate TE from NOC 
+heart_TEvNOC <- results(dds_dge_heart, contrast = c("Population", "OCE", "NOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_TEvNOC)
+
+# genes that differentiate TE from SOC
+heart_TEvSOC <- results(dds_dge_heart, contrast = c("Population", "OCE", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_TEvSOC)
+
+# genes the differentiate the references 
+heart_NOCvSOC <- results(dds_dge_heart, contrast = c("Population", "NOC", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_NOCvSOC)
+
+###########
+# Brain (genes different by temp for level 1 (TE) of second effect)
+brain_temp_DGE <- results(dds_dge_brain, name = "Cam.Temp_28_vs_12",pAdjustMethod = "BH", alpha=0.05)
+summary(brain_temp_DGE)
+
+# genes that differentiate TE from NOC 
+brain_TEvNOC <- results(dds_dge_brain, contrast = c("Population", "OCE", "NOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_TEvNOC)
+
+# genes that differentiate TE from SOC
+brain_TEvSOC <- results(dds_dge_brain, contrast = c("Population", "OCE", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_TEvSOC)
+
+# genes the differentiate the references 
+brain_NOCvSOC <- results(dds_dge_brain, contrast = c("Population", "NOC", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_NOCvSOC)
+
+# effect of temp for NOC pop
+brain_temp_NOC_DGE <- results(dds_dge_brain, list(c("Cam.Temp_28_vs_12","PopulationNOC.Cam.Temp28")) ,pAdjustMethod = "BH", alpha=0.05)
+summary(brain_temp_NOC_DGE)
+
+# effect of temp for SOC pop
+brain_temp_SOC_DGE <- results(dds_dge_brain, list(c("Cam.Temp_28_vs_12","PopulationSOC.Cam.Temp28")),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_temp_SOC_DGE)
+```
+
+
+```{r}
+# temp specific population differences
+# HEART
+# genes that differentiate TE from NOC - 12
+heart_TEvNOC_12 <- results(dds_dge_heart_12, contrast = c("Population", "OCE", "NOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_TEvNOC_12) # 93
+
+# genes that differentiate TE from SOC -12 
+heart_TEvSOC_12 <- results(dds_dge_heart_12, contrast = c("Population", "OCE", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_TEvSOC_12) # 22
+
+# genes the differentiate the references - 12
+heart_NOCvSOC_12 <- results(dds_dge_heart_12, contrast = c("Population", "NOC", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_NOCvSOC_12) # 92
+
+# genes that differentiate TE from NOC - 28
+heart_TEvNOC_28 <- results(dds_dge_heart_28, contrast = c("Population", "OCE", "NOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_TEvNOC_28) # 302
+
+# genes that differentiate TE from SOC - 28
+heart_TEvSOC_28 <- results(dds_dge_heart_28, contrast = c("Population", "OCE", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_TEvSOC_28) # 45
+
+# genes the differentiate the references - 28
+heart_NOCvSOC_28 <- results(dds_dge_heart_28, contrast = c("Population", "NOC", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(heart_NOCvSOC_28) # 373
+
+###############
+# BRAIN
+# genes that differentiate TE from NOC - 12
+brain_TEvNOC_12 <- results(dds_dge_brain_12, contrast = c("Population", "OCE", "NOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_TEvNOC_12) #276
+
+# genes that differentiate TE from SOC -12 
+brain_TEvSOC_12 <- results(dds_dge_brain_12, contrast = c("Population", "OCE", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_TEvSOC_12) #180
+
+# genes the differentiate the references - 12
+brain_NOCvSOC_12 <- results(dds_dge_brain_12, contrast = c("Population", "NOC", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_NOCvSOC_12) # 279
+
+# genes that differentiate TE from NOC - 28
+brain_TEvNOC_28 <- results(dds_dge_brain_28, contrast = c("Population", "OCE", "NOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_TEvNOC_28) # 135
+
+# genes that differentiate TE from SOC - 28
+brain_TEvSOC_28 <- results(dds_dge_brain_28, contrast = c("Population", "OCE", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_TEvSOC_28) # 283
+
+# genes the differentiate the references - 28
+brain_NOCvSOC_28 <- results(dds_dge_brain_28, contrast = c("Population", "NOC", "SOC"),pAdjustMethod = "BH", alpha=0.05)
+summary(brain_NOCvSOC_28) # 230
+
+```
+# variance
+```{r}
+# normalize
+heart_norm_factors <-  calcNormFactors(dds_dge_heart, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+t_heartcounts <- t(logCPM_heart)
+t_heartcounts <- as.data.frame(t_heartcounts)
+t_heartcounts$sample.ID <- rownames(t_heartcounts)
+
+hc4var <- merge(t_heartcounts, heart_meta2, by="sample.ID")
+
+# write function for CV
+cv <- function(x) {
+  sd(x) / mean(x) * 100
+}
+
+
+heart_vars <- matrix(NA,10535,3)
+for (i in 2:10536) {
+  heart_vars[i-1,1:3]<- tapply(hc4var[,i], hc4var$Population, cv)
+  
+}
+
+heart_vars <- as.data.frame(heart_vars)
+colnames(heart_vars) <- c("NOC","TE","SOC")
+
+# averages
+mean(heart_vars$NOC)
+mean(heart_vars$TE)
+mean(heart_vars$SOC)
+# NOC<SOC p = 0.01048, NOC<TE p = 0.01921, SOC=TE p = 0.1495
+t.test(heart_vars$SOC, heart_vars$TE)
+
+ggplot(heart_vars) + 
+  geom_density(aes(x=NOC, col="NOC")) +
+  geom_density(aes(x=TE, col="TE")) +
+  geom_density(aes(x=SOC, col="SOC")) +
+  scale_color_manual(values=c("blue", "red", "purple")) + xlim(-200,500) + theme_bw()
+
+## by temp
+heart_vars_temp <- matrix(NA,10535,2)
+for (i in 2:10536) {
+  heart_vars_temp[i-1,1:2]<- tapply(hc4var[,i], hc4var$Cam.Temp, cv)
+  
+}
+
+heart_vars_temp <- as.data.frame(heart_vars_temp)
+colnames(heart_vars_temp) <- c("temp12","temp28")
+
+# averages
+mean(heart_vars_temp$temp12) # 92.33719
+mean(heart_vars_temp$temp28) # 88.96449
+# p-value = 9.587e-05
+t.test(heart_vars_temp$temp12, heart_vars_temp$temp28)
+
+ggplot(heart_vars_temp) + 
+  geom_density(aes(x=temp12, col="temp12")) +
+  geom_density(aes(x=temp28, col="temp28")) +
+  scale_color_manual(values=c("blue", "orange")) + theme_bw()
+
+# within 12C
+hc4var_12 <- subset(hc4var, hc4var$Cam.Temp=="12")
+heart_vars_12 <- matrix(NA,10535,3)
+for (i in 2:10536) {
+  heart_vars_12[i-1,1:3]<- tapply(hc4var_12[,i], hc4var_12$Population, cv)
+  
+}
+
+heart_vars_12 <- as.data.frame(heart_vars_12)
+colnames(heart_vars_12) <- c("NOC","TE","SOC")
+
+#avg 
+mean(heart_vars_12$NOC) # 95.25
+mean(heart_vars_12$TE) # 120.21
+mean(heart_vars_12$SOC) # 103.65 
+
+#t.test TE>NOC p= 0.0001205, TE>SOC p =0.01492, SOC>NOC p =0.0003603
+t.test(heart_vars_12$SOC, heart_vars_12$NOC)
+
+
+# within 28C
+hc4var_28 <- subset(hc4var, hc4var$Cam.Temp=="28")
+heart_vars_28 <- matrix(NA,10535,3)
+for (i in 2:10536) {
+  heart_vars_28[i-1,1:3]<- tapply(hc4var_28[,i], hc4var_28$Population, cv)
+  
+}
+
+heart_vars_28 <- as.data.frame(heart_vars_28)
+colnames(heart_vars_28) <- c("NOC","TE","SOC")
+
+#avg 
+mean(heart_vars_28$NOC) # 95.08
+mean(heart_vars_28$TE) # 96.88
+mean(heart_vars_28$SOC) # 87.03 
+
+#t.test p=0.002526 SOC<TE, p=7.97e-09 SOC<NOC, TE=NOC p=0.5691
+t.test(heart_vars_28$NOC, heart_vars_28$TE)
+```
+
+```{r}
+brain_norm_factors <-  calcNormFactors(dds_dge_brain, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+t_braincounts <- t(logCPM_brain)
+t_braincounts <- as.data.frame(t_braincounts)
+t_braincounts$sample.ID <- rownames(t_braincounts)
+
+bc4var <- merge(t_braincounts, brain_meta2, by="sample.ID")
+
+# by pop
+brain_vars <- matrix(NA,10932,3)
+for (i in 2:10933) {
+  brain_vars[i-1,1:3]<- tapply(bc4var[,i], bc4var$Population, cv)
+  
+}
+
+brain_vars <- as.data.frame(brain_vars)
+colnames(brain_vars) <- c("NOC","TE","SOC")
+
+plot(density(brain_vars$NOC))
+plot(density(brain_vars$TE))
+plot(density(brain_vars$SOC))
+
+# averages
+mean(brain_vars$NOC) #79.6039
+mean(brain_vars$TE) # 79.02308
+mean(brain_vars$SOC) #  81.99074
+
+# t.test NOC<SOC p =3.073e-05, NOC=TE p = 0.2981, SOC>TE p = 1.366e-07
+t.test(brain_vars$SOC, brain_vars$TE)
+
+## by temp
+brain_vars_temp <- matrix(NA,10932,2)
+for (i in 2:10933) {
+  brain_vars_temp[i-1,1:2]<- tapply(bc4var[,i], bc4var$Cam.Temp, cv)
+  
+}
+
+brain_vars_temp <- as.data.frame(brain_vars_temp)
+colnames(brain_vars_temp) <- c("temp12","temp28")
+
+mean(brain_vars_temp$temp12) # 80.52065
+mean(brain_vars_temp$temp28) # 79.24281
+#p-value = 0.02014
+t.test(brain_vars_temp$temp12, brain_vars_temp$temp28)
+
+# within 12C
+bc4var_12 <- subset(bc4var, bc4var$Cam.Temp=="12")
+brain_vars_12 <- matrix(NA,10932,3)
+for (i in 2:10933) {
+  brain_vars_12[i-1,1:3]<- tapply(bc4var_12[,i], bc4var_12$Population, cv)
+  
+}
+
+brain_vars_12 <- as.data.frame(brain_vars_12)
+colnames(brain_vars_12) <- c("NOC","TE","SOC")
+
+#avg 
+mean(brain_vars_12$NOC) # 77.02033
+mean(brain_vars_12$TE) # 80.20897
+mean(brain_vars_12$SOC) # 81.40996
+
+#t.test TE>NOC p= 2.918e-08, TE<SOC p =0.04042, SOC>NOC p =1.106e-13
+t.test(brain_vars_12$SOC, brain_vars_12$TE)
+
+
+# within 28C
+bc4var_28 <- subset(bc4var, bc4var$Cam.Temp=="28")
+brain_vars_28 <- matrix(NA,10932,3)
+for (i in 2:10933) {
+  brain_vars_28[i-1,1:3]<- tapply(bc4var_28[,i], bc4var_28$Population, cv)
+  
+}
+
+brain_vars_28 <- as.data.frame(brain_vars_28)
+colnames(brain_vars_28) <- c("NOC","TE","SOC")
+
+#avg 
+mean(brain_vars_28$NOC) # 76.08646
+mean(brain_vars_28$TE) # 73.37603
+mean(brain_vars_28$SOC) # 76.09054 
+
+#t.test NOC>TE p=2.971e-06, SOC>TE p = 2.7e-06, NOC=SOC p=0.9945
+t.test(brain_vars_28$SOC, brain_vars_28$NOC)
+```
+# compare only variance in DEGs within a pop by temp
+```{r}
+# variance in DEGs by temp in TE
+heart_NG_top <- subset(heart_temp_DGE, heart_temp_DGE$padj < 0.05)
+nrow(heart_NG_top) # 63 genes with p<0.05
+mean(heart_NG_top$log2FoldChange) # 4.035
+heart_NG_top_list <- rownames(heart_NG_top)
+heart_meta_TE <- subset(heart_meta2, heart_meta2$Population =="OCE")
+names_group_TE <- heart_meta_TE$sample.ID
+heart_NG_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_NG_top_list)
+heart_NG_top_mat <- heart_NG_top_mat[,colnames(heart_NG_top_mat) %in% names_group_TE]
+
+heart_TE_top_mat <- as.data.frame(t(heart_NG_top_mat))
+heart_TE_top_mat$sample.ID <- rownames(heart_TE_top_mat)
+heart_TE_top_mat <- merge(heart_TE_top_mat , heart_meta_TE, by="sample.ID")
+
+heart_TE_vars<- matrix(NA,63,1)
+for (i in 2:64) {
+  heart_TE_vars[i-1,1]<- tapply(heart_TE_top_mat[,i], heart_TE_top_mat$Population, cv)
+  
+}
+
+heart_TE_vars <- as.data.frame(heart_TE_vars)
+plot(density(heart_TE_vars$V1))
+mean(heart_TE_vars$V1) # 220.8479
+
+# comparing within temp for a pop up and down regulated
+heart_TE_vars_temp<- matrix(NA,63,2)
+for (i in 2:64) {
+  heart_TE_vars_temp[i-1,1:2]<- tapply(heart_TE_top_mat[,i], heart_TE_top_mat$Cam.Temp, cv)
+  
+}
+heart_TE_var_DEG <- heart_temp_DGE
+heart_TE_var_DEG$mRNA <- rownames(heart_TE_var_DEG)
+heart_TE_var_DEG <- as.data.frame(heart_TE_var_DEG)
+
+heart_TE_vars_temp <- as.data.frame(heart_TE_vars_temp)
+mean(heart_TE_vars_temp$V1) # 307.5244
+mean(heart_TE_vars_temp$V2) # 246.4475
+rownames(heart_TE_vars_temp) <- colnames(heart_TE_top_mat[,2:64])
+heart_TE_vars_temp$mRNA <- rownames(heart_TE_vars_temp)
+heart_TE_vars_temp <- merge(heart_TE_vars_temp, heart_TE_var_DEG, by="mRNA")
+heart_TE_vars_temp_UP <- subset(heart_TE_vars_temp, heart_TE_vars_temp$log2FoldChange>0)
+heart_TE_vars_temp_DOWN <- subset(heart_TE_vars_temp, heart_TE_vars_temp$log2FoldChange<0)
+
+# variance within temp and up vs. down regulated
+# V1=12, V2=28
+# UP = lower expression at 12C than 28C
+# DOWN = lower expression at 28C than 12C
+mean(heart_TE_vars_temp_UP$V1) # 401.83 lowly expressed at 12
+mean(heart_TE_vars_temp_UP$V2) # 149.5123 highly expressed at 28
+mean(heart_TE_vars_temp_DOWN$V1) # 118.9133 highly expressed at 12
+mean(heart_TE_vars_temp_DOWN$V2) # 440.3178 lowly expressed at 28
+
+mean(heart_TE_vars_temp$V1) # 307.5244 overall 12
+mean(heart_TE_vars_temp$V2) # 246.4475 overall 28
+# p ==  0.8126
+t.test(heart_TE_vars_temp$V1, heart_TE_vars_temp$V2)
+#########################################################
+# variance in DEGs by temp in NOC
+heart_NG_top <- subset(heart_temp_NOC_DGE, heart_temp_NOC_DGE$padj < 0.05)
+nrow(heart_NG_top) # 277 genes with p<0.05
+mean(heart_NG_top$log2FoldChange) # 4.035
+heart_NG_top_list <- rownames(heart_NG_top)
+heart_meta_NOC <- subset(heart_meta2, heart_meta2$Population =="NOC")
+names_group_NOC <- heart_meta_NOC$sample.ID
+heart_NG_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_NG_top_list)
+heart_NG_top_mat <- heart_NG_top_mat[,colnames(heart_NG_top_mat) %in% names_group_NOC]
+
+heart_NOC_top_mat <- as.data.frame(t(heart_NG_top_mat))
+heart_NOC_top_mat$sample.ID <- rownames(heart_NOC_top_mat)
+heart_NOC_top_mat <- merge(heart_NOC_top_mat , heart_meta_NOC, by="sample.ID")
+
+heart_NOC_vars<- matrix(NA,277,1)
+for (i in 2:278) {
+  heart_NOC_vars[i-1,1]<- tapply(heart_NOC_top_mat[,i], heart_NOC_top_mat$Population, cv)
+  
+}
+
+heart_NOC_vars <- as.data.frame(heart_NOC_vars)
+plot(density(heart_NOC_vars$V1))
+mean(heart_NOC_vars$V1) # 249.2631
+
+# comparing within temp for a pop up and down regulated
+heart_NOC_vars_temp<- matrix(NA,277,2)
+for (i in 2:278) {
+  heart_NOC_vars_temp[i-1,1:2]<- tapply(heart_NOC_top_mat[,i], heart_NOC_top_mat$Cam.Temp, cv)
+  
+}
+
+heart_NOC_vars_temp <- as.data.frame(heart_NOC_vars_temp)
+mean(heart_NOC_vars_temp$V1) # 307.5244
+mean(heart_NOC_vars_temp$V2) # 246.4475
+rownames(heart_NOC_vars_temp) <- colnames(heart_NOC_top_mat[,2:278])
+heart_NOC_vars_temp$mRNA <- rownames(heart_NOC_vars_temp)
+heart_NOC_var_DEG <- as.data.frame(heart_NG_top)
+heart_NOC_var_DEG$mRNA <- rownames(heart_NOC_var_DEG)
+heart_NOC_vars_temp <- merge(heart_NOC_vars_temp, heart_NOC_var_DEG, by="mRNA")
+heart_NOC_vars_temp_UP <- subset(heart_NOC_vars_temp, heart_NOC_vars_temp$log2FoldChange>0)
+heart_NOC_vars_temp_DOWN <- subset(heart_NOC_vars_temp, heart_NOC_vars_temp$log2FoldChange<0)
+
+# variance within temp and up vs. down regulated
+# V1=12, V2=28
+# UP = lower expression at 12C than 28C
+# DOWN = lower expression at 28C than 12C
+mean(heart_NOC_vars_temp_UP$V1) # 57.6731 lowly expressed at 12
+mean(heart_NOC_vars_temp_UP$V2) # 139.4557 highly expressed at 28
+mean(heart_NOC_vars_temp_DOWN$V1) # 149.0963 highly expressed at 12
+mean(heart_NOC_vars_temp_DOWN$V2) # 70.03401 lowly expressed at 28
+
+mean(heart_NOC_vars_temp$V1) # 109.1606 overall 12
+mean(heart_NOC_vars_temp$V2) # 100.359 overall 28
+# p-value = 0.3563
+t.test(heart_NOC_vars_temp$V1, heart_NOC_vars_temp$V2)
+###########################################################
+# variance in DEGs by temp in SOC
+heart_NG_top <- subset(heart_temp_SOC_DGE, heart_temp_SOC_DGE$padj < 0.05)
+nrow(heart_NG_top) # 36 genes with p<0.05
+mean(heart_NG_top$log2FoldChange) # 4.035
+heart_NG_top_list <- rownames(heart_NG_top)
+heart_meta_SOC <- subset(heart_meta2, heart_meta2$Population =="SOC")
+names_group_SOC <- heart_meta_SOC$sample.ID
+heart_NG_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_NG_top_list)
+heart_NG_top_mat <- heart_NG_top_mat[,colnames(heart_NG_top_mat) %in% names_group_SOC]
+
+heart_SOC_top_mat <- as.data.frame(t(heart_NG_top_mat))
+heart_SOC_top_mat$sample.ID <- rownames(heart_SOC_top_mat)
+heart_SOC_top_mat <- merge(heart_SOC_top_mat , heart_meta_SOC, by="sample.ID")
+
+heart_SOC_vars<- matrix(NA,36,1)
+for (i in 2:37) {
+  heart_SOC_vars[i-1,1]<- tapply(heart_SOC_top_mat[,i], heart_SOC_top_mat$Population, cv)
+  
+}
+
+heart_SOC_vars <- as.data.frame(heart_SOC_vars)
+plot(density(heart_SOC_vars$V1))
+mean(heart_SOC_vars$V1) # 190.5441
+
+# comparing within temp for a pop up and down regulated
+heart_SOC_vars_temp<- matrix(NA,36,2)
+for (i in 2:37) {
+  heart_SOC_vars_temp[i-1,1:2]<- tapply(heart_SOC_top_mat[,i], heart_SOC_top_mat$Cam.Temp, cv)
+  
+}
+
+heart_SOC_vars_temp <- as.data.frame(heart_SOC_vars_temp)
+mean(heart_SOC_vars_temp$V1) # 307.5244
+mean(heart_SOC_vars_temp$V2) # 246.4475
+rownames(heart_SOC_vars_temp) <- colnames(heart_SOC_top_mat[,2:37])
+heart_SOC_vars_temp$mRNA <- rownames(heart_SOC_vars_temp)
+heart_SOC_var_DEG <- as.data.frame(heart_NG_top)
+heart_SOC_var_DEG$mRNA <- rownames(heart_SOC_var_DEG)
+heart_SOC_vars_temp <- merge(heart_SOC_vars_temp, heart_SOC_var_DEG, by="mRNA")
+heart_SOC_vars_temp_UP <- subset(heart_SOC_vars_temp, heart_SOC_vars_temp$log2FoldChange>0)
+heart_SOC_vars_temp_DOWN <- subset(heart_SOC_vars_temp, heart_SOC_vars_temp$log2FoldChange<0)
+
+# variance within temp and up vs. down regulated
+# V1=12, V2=28
+# UP = lower expression at 12C than 28C
+# DOWN = lower expression at 28C than 12C
+mean(heart_SOC_vars_temp_UP$V1) # 358.1119 lowly expressed at 12
+mean(heart_SOC_vars_temp_UP$V2) # 111.1902 highly expressed at 28
+mean(heart_SOC_vars_temp_DOWN$V1) # 160.471 highly expressed at 12
+mean(heart_SOC_vars_temp_DOWN$V2) # 617.66 lowly expressed at 28
+
+mean(heart_SOC_vars_temp$V1) # overall at 12 303.2116
+mean(heart_SOC_vars_temp$V2) # overall at 28 -91.26817
+# p-value = 0.9881
+t.test(heart_SOC_vars_temp$V1, abs(heart_SOC_vars_temp$V2))
+```
+```{r}
+## BRAIN ##
+# variance in DEGs by temp in TE
+brain_NG_top <- subset(brain_temp_DGE, brain_temp_DGE$padj < 0.05)
+nrow(brain_NG_top) # 99 genes with p<0.05
+mean(brain_NG_top$log2FoldChange) # 
+brain_NG_top_list <- rownames(brain_NG_top)
+brain_meta_TE <- subset(brain_meta2, brain_meta2$Population =="OCE")
+names_group_TE <- brain_meta_TE$sample.ID
+brain_NG_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_NG_top_list)
+brain_NG_top_mat <- brain_NG_top_mat[,colnames(brain_NG_top_mat) %in% names_group_TE]
+
+brain_TE_top_mat <- as.data.frame(t(brain_NG_top_mat))
+brain_TE_top_mat$sample.ID <- rownames(brain_TE_top_mat)
+brain_TE_top_mat <- merge(brain_TE_top_mat , brain_meta_TE, by="sample.ID")
+
+brain_TE_vars<- matrix(NA,99,1)
+for (i in 2:100) {
+  brain_TE_vars[i-1,1]<- tapply(brain_TE_top_mat[,i], brain_TE_top_mat$Population, cv)
+  
+}
+
+brain_TE_vars <- as.data.frame(brain_TE_vars)
+plot(density(brain_TE_vars$V1))
+mean(brain_TE_vars$V1) # 220.8479
+
+# comparing within temp for a pop up and down regulated
+brain_TE_vars_temp<- matrix(NA,99,2)
+for (i in 2:100) {
+  brain_TE_vars_temp[i-1,1:2]<- tapply(brain_TE_top_mat[,i], brain_TE_top_mat$Cam.Temp, cv)
+  
+}
+
+brain_TE_vars_temp <- as.data.frame(brain_TE_vars_temp)
+mean(brain_TE_vars_temp$V1) # 307.5244
+mean(brain_TE_vars_temp$V2) # 246.4475
+rownames(brain_TE_vars_temp) <- colnames(brain_TE_top_mat[,2:100])
+brain_TE_vars_temp$mRNA <- rownames(brain_TE_vars_temp)
+brain_TE_var_DEG <- as.data.frame(brain_NG_top)
+brain_TE_var_DEG$mRNA <- rownames(brain_TE_var_DEG)
+brain_TE_vars_temp <- merge(brain_TE_vars_temp, brain_TE_var_DEG, by="mRNA")
+brain_TE_vars_temp_UP <- subset(brain_TE_vars_temp, brain_TE_vars_temp$log2FoldChange>0)
+brain_TE_vars_temp_DOWN <- subset(brain_TE_vars_temp, brain_TE_vars_temp$log2FoldChange<0)
+
+# variance within temp and up vs. down regulated
+# V1=12, V2=28
+# UP = lower expression at 12C than 28C
+# DOWN = lower expression at 28C than 12C
+mean(brain_TE_vars_temp_UP$V1) # 53.89602 lowly expressed at 12
+mean(brain_TE_vars_temp_UP$V2) # 91.25655 highly expressed at 28
+mean(brain_TE_vars_temp_DOWN$V1) # 99.97487 highly expressed at 12
+mean(brain_TE_vars_temp_DOWN$V2) # 38.57019 lowly expressed at 28
+
+mean(brain_TE_vars_temp$V1) # 92.52778 overall at 12
+mean(brain_TE_vars_temp$V2) # 47.08516 overall at 28
+#########################################################
+# variance in DEGs by temp in NOC
+brain_NG_top <- subset(brain_temp_NOC_DGE, brain_temp_NOC_DGE$padj < 0.05)
+nrow(brain_NG_top) # 226 genes with p<0.05
+mean(brain_NG_top$log2FoldChange) # 4.035
+brain_NG_top_list <- rownames(brain_NG_top)
+brain_meta_NOC <- subset(brain_meta2, brain_meta2$Population =="NOC")
+names_group_NOC <- brain_meta_NOC$sample.ID
+brain_NG_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_NG_top_list)
+brain_NG_top_mat <- brain_NG_top_mat[,colnames(brain_NG_top_mat) %in% names_group_NOC]
+
+brain_NOC_top_mat <- as.data.frame(t(brain_NG_top_mat))
+brain_NOC_top_mat$sample.ID <- rownames(brain_NOC_top_mat)
+brain_NOC_top_mat <- merge(brain_NOC_top_mat , brain_meta_NOC, by="sample.ID")
+
+brain_NOC_vars<- matrix(NA,226,1)
+for (i in 2:227) {
+  brain_NOC_vars[i-1,1]<- tapply(brain_NOC_top_mat[,i], brain_NOC_top_mat$Population, cv)
+  
+}
+
+brain_NOC_vars <- as.data.frame(brain_NOC_vars)
+plot(density(brain_NOC_vars$V1))
+mean(brain_NOC_vars$V1) # 249.2631
+
+# comparing within temp for a pop up and down regulated
+brain_NOC_vars_temp<- matrix(NA,226,2)
+for (i in 2:227) {
+  brain_NOC_vars_temp[i-1,1:2]<- tapply(brain_NOC_top_mat[,i], brain_NOC_top_mat$Cam.Temp, cv)
+  
+}
+
+brain_NOC_vars_temp <- as.data.frame(brain_NOC_vars_temp)
+mean(brain_NOC_vars_temp$V1) # 307.5244
+mean(brain_NOC_vars_temp$V2) # 246.4475
+rownames(brain_NOC_vars_temp) <- colnames(brain_NOC_top_mat[,2:227])
+brain_NOC_vars_temp$mRNA <- rownames(brain_NOC_vars_temp)
+brain_NOC_var_DEG <- as.data.frame(brain_NG_top)
+brain_NOC_var_DEG$mRNA <- rownames(brain_NOC_var_DEG)
+brain_NOC_vars_temp <- merge(brain_NOC_vars_temp, brain_NOC_var_DEG, by="mRNA")
+brain_NOC_vars_temp_UP <- subset(brain_NOC_vars_temp, brain_NOC_vars_temp$log2FoldChange>0)
+brain_NOC_vars_temp_DOWN <- subset(brain_NOC_vars_temp, brain_NOC_vars_temp$log2FoldChange<0)
+
+# variance within temp and up vs. down regulated
+# V1=12, V2=28
+# UP = lower expression at 12C than 28C
+# DOWN = lower expression at 28C than 12C
+mean(brain_NOC_vars_temp_UP$V1) # 48.66984 lowly expressed at 12
+mean(brain_NOC_vars_temp_UP$V2) # 96.41171 highly expressed at 28
+mean(brain_NOC_vars_temp_DOWN$V1) # 101.1553 highly expressed at 12
+mean(brain_NOC_vars_temp_DOWN$V2) # 32.51692 lowly expressed at 28
+
+mean(brain_NOC_vars_temp$V1) # 94.42044 overall at 12
+mean(brain_NOC_vars_temp$V2) # 40.71581 overall at 28
+###########################################################
+# variance in DEGs by temp in SOC
+brain_NG_top <- subset(brain_temp_SOC_DGE, brain_temp_SOC_DGE$padj < 0.05)
+nrow(brain_NG_top) # 234 genes with p<0.05
+mean(brain_NG_top$log2FoldChange) # 4.035
+brain_NG_top_list <- rownames(brain_NG_top)
+brain_meta_SOC <- subset(brain_meta2, brain_meta2$Population =="SOC")
+names_group_SOC <- brain_meta_SOC$sample.ID
+brain_NG_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_NG_top_list)
+brain_NG_top_mat <- brain_NG_top_mat[,colnames(brain_NG_top_mat) %in% names_group_SOC]
+
+brain_SOC_top_mat <- as.data.frame(t(brain_NG_top_mat))
+brain_SOC_top_mat$sample.ID <- rownames(brain_SOC_top_mat)
+brain_SOC_top_mat <- merge(brain_SOC_top_mat , brain_meta_SOC, by="sample.ID")
+
+brain_SOC_vars<- matrix(NA,234,1)
+for (i in 2:235) {
+  brain_SOC_vars[i-1,1]<- tapply(brain_SOC_top_mat[,i], brain_SOC_top_mat$Population, cv)
+  
+}
+
+brain_SOC_vars <- as.data.frame(brain_SOC_vars)
+plot(density(brain_SOC_vars$V1))
+mean(brain_SOC_vars$V1) # 190.5441
+
+# comparing within temp for a pop up and down regulated
+brain_SOC_vars_temp<- matrix(NA,234,2)
+for (i in 2:235) {
+  brain_SOC_vars_temp[i-1,1:2]<- tapply(brain_SOC_top_mat[,i], brain_SOC_top_mat$Cam.Temp, cv)
+  
+}
+
+brain_SOC_vars_temp <- as.data.frame(brain_SOC_vars_temp)
+mean(brain_SOC_vars_temp$V1) # 307.5244
+mean(brain_SOC_vars_temp$V2) # 246.4475
+rownames(brain_SOC_vars_temp) <- colnames(brain_SOC_top_mat[,2:235])
+brain_SOC_vars_temp$mRNA <- rownames(brain_SOC_vars_temp)
+brain_SOC_var_DEG <- as.data.frame(brain_NG_top)
+brain_SOC_var_DEG$mRNA <- rownames(brain_SOC_var_DEG)
+brain_SOC_vars_temp <- merge(brain_SOC_vars_temp, brain_SOC_var_DEG, by="mRNA")
+brain_SOC_vars_temp_UP <- subset(brain_SOC_vars_temp, brain_SOC_vars_temp$log2FoldChange>0)
+brain_SOC_vars_temp_DOWN <- subset(brain_SOC_vars_temp, brain_SOC_vars_temp$log2FoldChange<0)
+
+# variance within temp and up vs. down regulated
+# V1=12, V2=28
+# UP = lower expression at 12C than 28C
+# DOWN = lower expression at 28C than 12C
+mean(brain_SOC_vars_temp_UP$V1) # 49.38124 lowly expressed at 12
+mean(brain_SOC_vars_temp_UP$V2) # 102.4606 highly expressed at 28
+mean(brain_SOC_vars_temp_DOWN$V1) # 103.1213 highly expressed at 12
+mean(brain_SOC_vars_temp_DOWN$V2) # 39.26165 lowly expressed at 28
+
+mean(brain_SOC_vars_temp$V1) # 79.4665 overall at 12
+mean(brain_SOC_vars_temp$V2) # 67.07998 overall at 28
+```
+```{r}
+# chi-square on "clustering" of individuals in PC1 hearts
+plot(pcaData_H2$PC1, pcaData_H2$PC2)
+
+pcaData_H2 <- pcaData_H2 %>% mutate(group=if_else(PC1<0, 1,2))
+
+# p-value = 0.3738
+chisq.test(pcaData_H2$Habitat.temp, pcaData_H2$group)
+
+# p-value=0.1407
+chisq.test(pcaData_H2$group, pcaData_H2$Population)
+
+# p-value=0.796
+chisq.test(pcaData_H2$group, pcaData_H2$Sex)
+
+# p-value=1
+chisq.test(pcaData_H2$group, pcaData_H2$Cam.Temp)
+
+# chi-square on "clustering" of indivdiuals in PC1 brains
+plot(pcaData_H3$PC1, pcaData_H3$PC2)
+pcaData_H3 <- pcaData_H3 %>% mutate(group=if_else(PC1<0, 1,2))
+# p-value = 0.3498
+chisq.test(pcaData_H3$Habitat.temp, pcaData_H3$group)
+
+# p-value=0.1306
+chisq.test(pcaData_H3$group, pcaData_H3$Population)
+
+# p-value=0.5672
+chisq.test(pcaData_H3$group, pcaData_H3$Sex)
+
+# p-value=1
+chisq.test(pcaData_H3$group, pcaData_H3$Cam.Temp)
+
+heart_g1 <- subset(pcaData_H2, pcaData_H2$group=="1")
+brain_g2 <- subset(pcaData_H3, pcaData_H3$group=="2")
+```
+# Heatmaps
+# patterns across all hearts
+```{r}
+#library(RColorBrewer)
+#library(circlize)
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp
+heart_temp_top <- subset(heart_temp_DGE, heart_temp_DGE$padj < 0.05)
+nrow(heart_temp_top) # 157 genes with p<0.05
+
+mean(heart_temp_top$log2FoldChange)
+
+heart_temp_top_list <- rownames(heart_temp_top)
+
+heart_temp_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_temp_top_list)
+
+mat = as.matrix(scale(t(heart_temp_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_temp_top_mat)
+colnames(mat) = colnames(heart_temp_top_mat)
+
+column_ha = HeatmapAnnotation(Cam.Temp = heart_meta2$Cam.Temp, Habitat.temp = heart_meta2$Habitat.temp, col=list(Cam.Temp= c("12" =  "blue", "28" = "orange"), Habitat.temp=c("28" = "lightblue", "32"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+col_fun = rev(RColorBrewer::brewer.pal(11, "PRGn"))
+col_fun = colorRamp2(c(-2, 0, 2), c("darkblue", "white", "yellow"))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+# Heart - population specific temperature response
+```{r}
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE
+heart_NG_top <- subset(heart_temp_DGE, heart_temp_DGE$padj < 0.05)
+
+nrow(heart_NG_top) # 63 genes with p<0.05
+
+mean(heart_NG_top$log2FoldChange)
+
+heart_NG_top_list <- rownames(heart_NG_top)
+
+
+heart_meta_TE <- subset(heart_meta2, heart_meta2$Population =="OCE")
+names_group_TE <- heart_meta_TE$sample.ID
+
+heart_NG_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_NG_top_list)
+heart_NG_top_mat <- heart_NG_top_mat[,colnames(heart_NG_top_mat) %in% names_group_TE]
+
+mat = as.matrix(scale(t(heart_NG_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_NG_top_mat)
+colnames(mat) = colnames(heart_NG_top_mat)
+
+column_ha = HeatmapAnnotation(Cam.Temp = heart_meta_TE$Cam.Temp, Habitat.temp = heart_meta_TE$Habitat.temp, col=list(Cam.Temp= c("12" =  "blue", "28" = "orange"), Habitat.temp=c("28" = "lightblue", "32"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for NOC
+heart_NG_top <- subset(heart_temp_NOC_DGE, heart_temp_NOC_DGE$padj < 0.05)
+
+nrow(heart_NG_top) # 277 NOC genes by temp with p<0.05
+
+mean(heart_NG_top$log2FoldChange)
+
+heart_NG_top_list <- rownames(heart_NG_top)
+
+
+heart_meta_NOC <- subset(heart_meta2, heart_meta2$Population =="NOC")
+names_group_NOC <- heart_meta_NOC$sample.ID
+
+heart_NG_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_NG_top_list)
+heart_NG_top_mat <- heart_NG_top_mat[,colnames(heart_NG_top_mat) %in% names_group_NOC]
+
+mat = as.matrix(scale(t(heart_NG_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_NG_top_mat)
+colnames(mat) = colnames(heart_NG_top_mat)
+
+column_ha = HeatmapAnnotation(Cam.Temp = heart_meta_NOC$Cam.Temp, Habitat.temp = heart_meta_NOC$Habitat.temp, col=list(Cam.Temp= c("12" =  "blue", "28" = "orange"), Habitat.temp=c("28" = "lightblue", "32"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for SOC
+heart_NG_top <- subset(heart_temp_SOC_DGE, heart_temp_SOC_DGE$padj < 0.05)
+
+nrow(heart_NG_top) #36 SOC genes by temp with p<0.05
+
+mean(heart_NG_top$log2FoldChange)
+
+heart_NG_top_list <- rownames(heart_NG_top)
+
+
+heart_meta_SOC <- subset(heart_meta2, heart_meta2$Population =="SOC")
+names_group_SOC <- heart_meta_SOC$sample.ID
+
+heart_NG_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_NG_top_list)
+heart_NG_top_mat <- heart_NG_top_mat[,colnames(heart_NG_top_mat) %in% names_group_SOC]
+
+mat = as.matrix(scale(t(heart_NG_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_NG_top_mat)
+colnames(mat) = colnames(heart_NG_top_mat)
+
+column_ha = HeatmapAnnotation(Cam.Temp = heart_meta_SOC$Cam.Temp, Habitat.temp = heart_meta_SOC$Habitat.temp, col=list(Cam.Temp= c("12" =  "blue", "28" = "orange"), Habitat.temp=c("28" = "lightblue", "32"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+# Heart 12°C - differences among populations
+```{r}
+# HEART - 12
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart_12, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v NOC
+heart_top <- subset(heart_TEvNOC_12, heart_TEvNOC_12$padj < 0.05)
+heart_top2 <- subset(heart_TEvSOC_12, heart_TEvSOC_12$padj < 0.05)
+heart_top3 <- subset(heart_NOCvSOC_12, heart_NOCvSOC_12$padj < 0.05)
+
+
+topall_heart <- rbind(heart_top, heart_top2, heart_top3)
+nrow(topall_heart) 
+
+mean(topall_heart$log2FoldChange)
+
+heart_top_list <- unique(rownames(topall_heart))
+length(heart_top_list) #158
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% heart_meta_12$sample.ID]
+
+mat = as.matrix(scale(t(heart_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_top_mat)
+colnames(mat) = colnames(heart_top_mat)
+
+column_ha = HeatmapAnnotation( Population = heart_meta_12$Population, col=list(Population=c("NOC" = "blue", "OCE"="red", "SOC"="darkgrey")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# comparing variance in gene expression between acclimation groups
+heart_top <- subset(heart_TEvNOC_12, heart_TEvNOC_12$padj < 0.05)
+heart_top_list <- rownames(heart_top)
+heart_meta_TEvNOC_12 <- subset(heart_meta_12, heart_meta_12$Population !="SOC")
+names_TEvNOC_12 <- heart_meta_TEvNOC_12$sample.ID
+
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% names_TEvNOC_12]
+
+heart_TEvNOC12_list <- t(heart_top_mat)
+heart_TEvNOC12_list <- as.data.frame(heart_TEvNOC12_list)
+heart_TEvNOC12_list$sample.ID <- rownames(heart_TEvNOC12_list)
+heart_TEvNOC12_list_merged <- merge(heart_TEvNOC12_list, heart_meta_TEvNOC_12, by="sample.ID")
+
+gs4 <- colnames(heart_TEvNOC12_list_merged)[2:92]
+levene_TEvNOC12_heartModelsList <- lapply(gsub(" ", "", paste(paste("`"),gs4,paste("`"),"~Population")), as.formula)
+
+heart_TEvNOC12_list_merged$Population <- as.factor(heart_TEvNOC12_list_merged$Population)
+
+heart_TEvNOC12_vars <- matrix(NA,91,2)
+for (i in 2:92) {
+  heart_TEvNOC12_vars[i-1,1:2]<- tapply(heart_TEvNOC12_list_merged[,i], heart_TEvNOC12_list_merged$Population, cv)
+  
+}
+
+heart_TEvNOC12_vars <- as.data.frame(heart_TEvNOC12_vars)
+colnames(heart_TEvNOC12_vars) <- c("NOC", "TE")
+plot(density(heart_TEvNOC12_vars$NOC))
+plot(density(heart_TEvNOC12_vars$TE))
+
+# average 
+sd(heart_TEvNOC12_vars$NOC)/ mean(heart_TEvNOC12_vars$NOC) # 1.02
+sd(heart_TEvNOC12_vars$TE)/mean(heart_TEvNOC12_vars$TE) # 0.75
+```
+
+```{r}
+# HEART - 12
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart_12, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v SOC
+heart_top <- subset(heart_TEvSOC_12, heart_TEvSOC_12$padj < 0.05)
+
+nrow(heart_top) #22 between TE and SOC at 12, with p<0.05
+
+mean(heart_top$log2FoldChange)
+
+heart_top_list <- rownames(heart_top)
+
+
+heart_meta_TEvSOC_12 <- subset(heart_meta_12, heart_meta_12$Population !="NOC")
+names_TEvSOC_12 <- heart_meta_TEvSOC_12$sample.ID
+
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% names_TEvSOC_12]
+
+mat = as.matrix(scale(t(heart_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_top_mat)
+colnames(mat) = colnames(heart_top_mat)
+
+column_ha = HeatmapAnnotation( Population = heart_meta_TEvSOC_12$Population, col=list(Population=c("SOC" = "purple", "OCE"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+```{r}
+# HEART - 12
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart_12, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for  NOC v SOC
+heart_top <- subset(heart_NOCvSOC_12, heart_NOCvSOC_12$padj < 0.05)
+
+nrow(heart_top) #91 between NOC and SOC at 12, with p<0.05
+
+mean(heart_top$log2FoldChange)
+
+heart_top_list <- rownames(heart_top)
+
+
+heart_meta_NOCvSOC_12 <- subset(heart_meta_12, heart_meta_12$Population !="OCE")
+names_NOCvSOC_12 <- heart_meta_NOCvSOC_12$sample.ID
+
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% names_NOCvSOC_12]
+
+mat = as.matrix(scale(t(heart_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_top_mat)
+colnames(mat) = colnames(heart_top_mat)
+
+column_ha = HeatmapAnnotation( Population = heart_meta_NOCvSOC_12$Population, col=list(Population=c("SOC" = "purple", "NOC"="blue")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+# Heart 28°C - differences among populations
+```{r}
+# HEART - 28
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart_28, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v NOC
+heart_top <- subset(heart_TEvNOC_28, heart_TEvNOC_28$padj < 0.05)
+
+nrow(heart_top) #302 TEvNOC genes at 28 with p<0.05
+
+mean(heart_top$log2FoldChange)
+
+heart_top_list <- rownames(heart_top)
+
+
+heart_meta_TEvNOC_28 <- subset(heart_meta_28, heart_meta_28$Population !="SOC")
+names_TEvNOC_28 <- heart_meta_TEvNOC_28$sample.ID
+
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% names_TEvNOC_28]
+
+mat = as.matrix(scale(t(heart_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_top_mat)
+colnames(mat) = colnames(heart_top_mat)
+
+column_ha = HeatmapAnnotation( Population = heart_meta_TEvNOC_28$Population, col=list(Population=c("NOC" = "blue", "OCE"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# HEART - 28
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart_28, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v SOC
+heart_top <- subset(heart_TEvSOC_28, heart_TEvSOC_28$padj < 0.05)
+
+nrow(heart_top) #45 between TE and SOC at 28, with p<0.05
+
+mean(heart_top$log2FoldChange)
+
+heart_top_list <- rownames(heart_top)
+
+
+heart_meta_TEvSOC_28 <- subset(heart_meta_28, heart_meta_28$Population !="NOC")
+names_TEvSOC_28 <- heart_meta_TEvSOC_28$sample.ID
+
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% names_TEvSOC_28]
+
+mat = as.matrix(scale(t(heart_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_top_mat)
+colnames(mat) = colnames(heart_top_mat)
+
+column_ha = HeatmapAnnotation( Population = heart_meta_TEvSOC_28$Population, col=list(Population=c("SOC" = "darkgrey", "OCE"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# HEART - 28
+# normalize counts for visualization
+heart_norm_factors <-  calcNormFactors(dds_dge_heart_28, method="TMM")
+logCPM_heart <- cpm(heart_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for NOC v SOC
+heart_top <- subset(heart_NOCvSOC_28, heart_NOCvSOC_28$padj < 0.05)
+
+nrow(heart_top) #373 between NOC and SOC at 12, with p<0.05
+
+mean(heart_top$log2FoldChange)
+
+heart_top_list <- rownames(heart_top)
+
+
+heart_meta_NOCvSOC_28 <- subset(heart_meta_28, heart_meta_28$Population !="OCE")
+names_NOCvSOC_28 <- heart_meta_NOCvSOC_28$sample.ID
+
+heart_top_mat <- subset(logCPM_heart, rownames(logCPM_heart) %in% heart_top_list)
+heart_top_mat <- heart_top_mat[,colnames(heart_top_mat) %in% names_NOCvSOC_28]
+
+mat = as.matrix(scale(t(heart_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(heart_top_mat)
+colnames(mat) = colnames(heart_top_mat)
+
+column_ha = HeatmapAnnotation( Population = heart_meta_NOCvSOC_28$Population, col=list(Population=c("SOC" = "darkgrey", "NOC"="blue")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+# Brain 28°C heatmaps - differences among populations
+```{r}
+# BRAIN - 28
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain_28, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v NOC
+brain_top <- subset(brain_TEvNOC_28, brain_TEvNOC_28$padj < 0.05)
+
+nrow(brain_top) #391 TEvNOC genes at 28 with p<0.05
+
+mean(brain_top$log2FoldChange)
+
+brain_top_list <- rownames(brain_top)
+
+
+brain_meta_TEvNOC_28 <- subset(brain_meta_28, brain_meta_28$Population !="SOC")
+names_TEvNOC_28 <- brain_meta_TEvNOC_28$sample.ID
+
+brain_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_list)
+brain_top_mat <- brain_top_mat[,colnames(brain_top_mat) %in% names_TEvNOC_28]
+
+mat = as.matrix(scale(t(brain_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_mat)
+colnames(mat) = colnames(brain_top_mat)
+
+column_ha = HeatmapAnnotation( Population = brain_meta_TEvNOC_28$Population, col=list(Population=c("NOC" = "blue", "OCE"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# BRAIN - 28
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain_28, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v SOC
+brain_top <- subset(brain_TEvSOC_28, brain_TEvSOC_28$padj < 0.05)
+
+nrow(brain_top) #282 TEvSOC genes at 28 with p<0.05
+
+mean(brain_top$log2FoldChange)
+
+brain_top_list <- rownames(brain_top)
+
+
+brain_meta_TEvSOC_28 <- subset(brain_meta_28, brain_meta_28$Population !="NOC")
+names_TEvSOC_28 <- brain_meta_TEvSOC_28$sample.ID
+
+brain_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_list)
+brain_top_mat <- brain_top_mat[,colnames(brain_top_mat) %in% names_TEvSOC_28]
+
+mat = as.matrix(scale(t(brain_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_mat)
+colnames(mat) = colnames(brain_top_mat)
+
+column_ha = HeatmapAnnotation( Population = brain_meta_TEvSOC_28$Population, col=list(Population=c("SOC" = "darkgrey", "OCE"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# BRAIN - 28
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain_28, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for  NOC v SOC
+brain_top <- subset(brain_NOCvSOC_28, brain_NOCvSOC_28$padj < 0.05)
+
+nrow(brain_top) #380 TEvSOC genes at 28 with p<0.05
+
+mean(brain_top$log2FoldChange)
+
+brain_top_list <- rownames(brain_top)
+
+
+brain_meta_NOCvSOC_28 <- subset(brain_meta_28, brain_meta_28$Population !="OCE")
+names_NOCvSOC_28 <- brain_meta_NOCvSOC_28$sample.ID
+
+brain_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_list)
+brain_top_mat <- brain_top_mat[,colnames(brain_top_mat) %in% names_NOCvSOC_28]
+
+mat = as.matrix(scale(t(brain_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_mat)
+colnames(mat) = colnames(brain_top_mat)
+
+column_ha = HeatmapAnnotation( Population = brain_meta_NOCvSOC_28$Population, col=list(Population=c("SOC" = "darkgrey", "NOC"="blue")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+# Brain 12°C heatmaps - differences among populations
+```{r}
+# BRAIN - 12
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain_12, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v NOC
+brain_top <- subset(brain_TEvNOC_12, brain_TEvNOC_12$padj < 0.05)
+brain_top2 <- subset(brain_TEvSOC_12, brain_TEvSOC_12$padj < 0.05)
+brain_top3 <- subset(brain_NOCvSOC_12, brain_NOCvSOC_12$padj < 0.05)
+
+topall_brain <- rbind(brain_top, brain_top2, brain_top3)
+
+nrow(topall_brain) #320
+
+mean(topall_brain$log2FoldChange)
+
+brain_top_list <- unique(rownames(topall_brain))
+length(brain_top_list) #242
+
+brain_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_list)
+brain_top_mat <- brain_top_mat[,colnames(brain_top_mat) %in% brain_meta_12$sample.ID]
+
+mat = as.matrix(scale(t(brain_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_mat)
+colnames(mat) = colnames(brain_top_mat)
+
+column_ha = HeatmapAnnotation( Population = brain_meta_12$Population, col=list(Population=c("NOC" = "blue", "OCE"="red", "SOC"="darkgrey")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# BRAIN - 12
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain_12, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for TE v SOC
+brain_top <- subset(brain_TEvSOC_12, brain_TEvSOC_12$padj < 0.05)
+
+nrow(brain_top) #183 TEvSOC genes at 28 with p<0.05
+
+mean(brain_top$log2FoldChange)
+
+brain_top_list <- rownames(brain_top)
+
+
+brain_meta_TEvSOC_12 <- subset(brain_meta_12, brain_meta_12$Population !="NOC")
+names_TEvSOC_12 <- brain_meta_TEvSOC_12$sample.ID
+
+brain_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_list)
+brain_top_mat <- brain_top_mat[,colnames(brain_top_mat) %in% names_TEvSOC_12]
+
+mat = as.matrix(scale(t(brain_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_mat)
+colnames(mat) = colnames(brain_top_mat)
+
+column_ha = HeatmapAnnotation( Population = brain_meta_TEvSOC_12$Population, col=list(Population=c("SOC" = "darkgrey", "OCE"="red")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# BRAIN - 12
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain_12, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap by acclimation temp for NOC v SOC
+brain_top <- subset(brain_NOCvSOC_12, brain_NOCvSOC_12$padj < 0.05)
+
+nrow(brain_top) #127 TEvSOC genes at 28 with p<0.05
+
+mean(brain_top$log2FoldChange)
+
+brain_top_list <- rownames(brain_top)
+
+
+brain_meta_NOCvSOC_12 <- subset(brain_meta_12, brain_meta_12$Population !="OCE")
+names_NOCvSOC_12 <- brain_meta_NOCvSOC_12$sample.ID
+
+brain_top_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_list)
+brain_top_mat <- brain_top_mat[,colnames(brain_top_mat) %in% names_NOCvSOC_12]
+
+mat = as.matrix(scale(t(brain_top_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_mat)
+colnames(mat) = colnames(brain_top_mat)
+
+column_ha = HeatmapAnnotation( Population = brain_meta_NOCvSOC_12$Population, col=list(Population=c("SOC" = "darkgrey", "NOC"="blue")))
+
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+# Brain population specific temp. response
+```{r}
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap of top DEGs by temp for brain (effect of temp of Pop1=TE)
+brain_top_30 <- subset(brain_temp_DGE, brain_temp_DGE$padj < 0.05)
+#write.csv(brain_top_30, "brain_TE_temp.csv")
+nrow(brain_top_30) #TE 99 genes by temp with p<0.05 
+
+mean(brain_top_30$log2FoldChange)
+
+brain_top_30_list <- rownames(brain_top_30)
+brain_top_30_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_30_list)
+
+mat = as.matrix(scale(t(brain_top_30_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_30_mat)
+colnames(mat) = colnames(brain_top_30_mat)
+column_ha = HeatmapAnnotation(Cam.Temp = brain_meta2$Cam.Temp, Population = brain_meta2$Population, col=list(Cam.Temp= c("12" =  "lightblue", "28" = "orange"), Population=c("NOC" = "blue", "OCE"="red", "SOC"="darkgrey")))
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap of top DEGs by temp for brain TE population
+brain_top_30 <- subset(brain_temp_DGE, brain_temp_DGE$padj < 0.05)
+nrow(brain_top_30) #99 genes with p<0.05, 54 with p< 0.0000001
+
+mean(brain_top_30$log2FoldChange)
+
+brain_meta_TE <- subset(brain_meta2, brain_meta2$Habitat.temp=="32")
+names_TE<- brain_meta_TE$sample.ID
+
+brain_top_30_list <- rownames(brain_top_30)
+
+brain_top_30_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_30_list)
+brain_top_30_mat <- brain_top_30_mat[,colnames(brain_top_30_mat) %in% names_TE]
+
+mat = as.matrix(scale(t(brain_top_30_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_30_mat)
+colnames(mat) = colnames(brain_top_30_mat)
+column_ha = HeatmapAnnotation(Cam.Temp = brain_meta_TE$Cam.Temp, Population = brain_meta_TE$Population, col=list(Cam.Temp= c("12" =  "lightblue", "28" = "orange"), Population=c("NOC" = "blue", "OCE"="red", "SOC"="darkgrey")))
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap of top DEGs by temp for brain
+brain_top_30 <- subset(brain_temp_NOC_DGE, brain_temp_NOC_DGE$padj < 0.05)
+#write.csv(brain_top_30, "brain_NOC_temp.csv")
+nrow(brain_top_30) #NOC 226 genes by temp with p<0.05
+
+mean(brain_top_30$log2FoldChange)
+
+brain_meta_TE <- subset(brain_meta2, brain_meta2$Population=="NOC")
+names_TE<- brain_meta_TE$sample.ID
+
+brain_top_30_list <- rownames(brain_top_30)
+
+brain_top_30_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_30_list)
+brain_top_30_mat <- brain_top_30_mat[,colnames(brain_top_30_mat) %in% names_TE]
+
+mat = as.matrix(scale(t(brain_top_30_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_30_mat)
+colnames(mat) = colnames(brain_top_30_mat)
+column_ha = HeatmapAnnotation(Cam.Temp = brain_meta_TE$Cam.Temp, Population = brain_meta_TE$Population, col=list(Cam.Temp= c("12" =  "lightblue", "28" = "orange"), Population=c("NOC" = "blue", "OCE"="red", "SOC"="darkgrey")))
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+```{r}
+# normalize counts for visualization
+brain_norm_factors <-  calcNormFactors(dds_dge_brain, method="TMM")
+logCPM_brain <- cpm(brain_norm_factors, log=TRUE)
+
+# heatmap of top DEGs by temp for brain
+brain_top_30 <- subset(brain_temp_SOC_DGE, brain_temp_SOC_DGE$padj < 0.05)
+#write.csv(brain_top_30, "brain_SOC_temp.csv")
+nrow(brain_top_30) #SOC 234 genes by temp with p<0.05
+
+mean(brain_top_30$log2FoldChange)
+
+brain_meta_TE <- subset(brain_meta2, brain_meta2$Population=="SOC")
+names_TE<- brain_meta_TE$sample.ID
+
+brain_top_30_list <- rownames(brain_top_30)
+
+brain_top_30_mat <- subset(logCPM_brain, rownames(logCPM_brain) %in% brain_top_30_list)
+brain_top_30_mat <- brain_top_30_mat[,colnames(brain_top_30_mat) %in% names_TE]
+
+mat = as.matrix(scale(t(brain_top_30_mat)))
+mat <- t(mat)
+rownames(mat) = rownames(brain_top_30_mat)
+colnames(mat) = colnames(brain_top_30_mat)
+column_ha = HeatmapAnnotation(Cam.Temp = brain_meta_TE$Cam.Temp, Population = brain_meta_TE$Population, col=list(Cam.Temp= c("12" =  "lightblue", "28" = "orange"), Population=c("NOC" = "blue", "OCE"="red", "SOC"="darkgrey")))
+row_dend = as.dendrogram(hclust(dist(mat, method="euclidean")))
+col_dend = as.dendrogram(hclust(dist(t(mat), method="euclidean")))
+
+Heatmap(mat, name = "mat", top_annotation = column_ha, cluster_rows=row_dend, cluster_columns = col_dend, row_names_gp = gpar(fontsize = 4), column_names_gp =gpar(fontsize=12), column_names_rot = 45, col=col_fun)
+```
+
+# shared response to temp among populations
+```{r}
+# HEART -- populations
+heart_temp_NOC_signif<- subset(heart_temp_NOC_DGE, heart_temp_NOC_DGE$padj<0.05)
+heart_temp_SOC_signif<- subset(heart_temp_SOC_DGE, heart_temp_SOC_DGE$padj<0.05)
+heart_temp_TE_signif<- subset(heart_temp_DGE, heart_temp_DGE$padj<0.05)
+
+all_heart_accl <- rbind(heart_temp_NOC_signif, heart_temp_SOC_signif, heart_temp_TE_signif)
+
+heart_temp_NOC_signif_up<- subset(heart_temp_NOC_signif, heart_temp_NOC_signif$log2FoldChange>0)
+heart_temp_SOC_signif_up<- subset(heart_temp_SOC_signif, heart_temp_SOC_signif$log2FoldChange>0)
+heart_temp_TE_signif_up<- subset(heart_temp_TE_signif, heart_temp_TE_signif$log2FoldChange>0)
+
+heart_temp_NOC_signif_down<- subset(heart_temp_NOC_signif, heart_temp_NOC_signif$log2FoldChange<0)
+heart_temp_SOC_signif_down<- subset(heart_temp_SOC_signif, heart_temp_SOC_signif$log2FoldChange<0)
+heart_temp_TE_signif_down<- subset(heart_temp_TE_signif, heart_temp_TE_signif$log2FoldChange<0)
+
+# total up and down regulated
+nrow(heart_temp_NOC_signif_up) #121
+nrow(heart_temp_NOC_signif_down) #156
+
+nrow(heart_temp_SOC_signif_up) #26
+nrow(heart_temp_SOC_signif_down) #10
+
+nrow(heart_temp_TE_signif_up) #42
+nrow(heart_temp_TE_signif_down) #21
+
+# Shared Upregulated
+nrow(subset(heart_temp_NOC_signif_up, rownames(heart_temp_NOC_signif_up) %in% rownames(heart_temp_TE_signif_up) | rownames(heart_temp_NOC_signif_up) %in% rownames(heart_temp_SOC_signif_up))) #3
+
+nrow(subset(heart_temp_SOC_signif_up, rownames(heart_temp_SOC_signif_up) %in% rownames(heart_temp_TE_signif_up) | rownames(heart_temp_SOC_signif_up) %in% rownames(heart_temp_NOC_signif_up))) #2
+
+nrow(subset(heart_temp_TE_signif_up, rownames(heart_temp_TE_signif_up) %in% rownames(heart_temp_NOC_signif_up) | rownames(heart_temp_TE_signif_up) %in% rownames(heart_temp_SOC_signif_up))) #1
+
+# Shared Downregulated
+nrow(subset(heart_temp_NOC_signif_down, rownames(heart_temp_NOC_signif_down) %in% rownames(heart_temp_TE_signif_down) | rownames(heart_temp_NOC_signif_down) %in% rownames(heart_temp_SOC_signif_down))) #2
+
+nrow(subset(heart_temp_SOC_signif_down, rownames(heart_temp_SOC_signif_down) %in% rownames(heart_temp_TE_signif_down) | rownames(heart_temp_SOC_signif_down) %in% rownames(heart_temp_NOC_signif_down))) #0
+
+nrow(subset(heart_temp_TE_signif_down, rownames(heart_temp_TE_signif_down) %in% rownames(heart_temp_NOC_signif_down) | rownames(heart_temp_TE_signif_down) %in% rownames(heart_temp_SOC_signif_down))) #2
+
+# Shared overall signif
+# 9 shared genes NOC and TE heart
+set1 <- subset(heart_temp_NOC_signif, rownames(heart_temp_NOC_signif)  %in% rownames(heart_temp_TE_signif))
+set1
+# 0 shared genes SOC and TE heart
+set2 <- subset(heart_temp_SOC_signif, rownames(heart_temp_SOC_signif)  %in% rownames(heart_temp_TE_signif))
+set2
+# 5 shared genes NOC and SOC heart
+set3 <- subset(heart_temp_NOC_signif, rownames(heart_temp_NOC_signif)  %in% rownames(heart_temp_SOC_signif))
+set3
+rownames(set1) %in% rownames(set3) # zero shared among NOCvTE and NOCvSOC
+
+# BRAIN -- 
+brain_temp_NOC_signif<- subset(brain_temp_NOC_DGE, brain_temp_NOC_DGE$padj<0.05)
+brain_temp_SOC_signif<- subset(brain_temp_SOC_DGE, brain_temp_SOC_DGE$padj<0.05)
+brain_temp_TE_signif<- subset(brain_temp_DGE, brain_temp_DGE$padj<0.05)
+
+all_brain_accl <- rbind(brain_temp_NOC_signif, brain_temp_SOC_signif, brain_temp_TE_signif)
+
+# 5 shared genes NOC and TE brain
+set4 <- subset(brain_temp_NOC_signif, rownames(brain_temp_NOC_signif)  %in% rownames(brain_temp_TE_signif))
+
+# 10 shared genes SOC and TE brain
+set5 <- subset(brain_temp_SOC_signif, rownames(brain_temp_SOC_signif)  %in% rownames(brain_temp_TE_signif))
+
+# 16 shared genes NOC and SOC brain
+set6 <- subset(brain_temp_NOC_signif, rownames(brain_temp_NOC_signif)  %in% rownames(brain_temp_SOC_signif))
+
+rownames(set4) %in% rownames(set6) # one shared among NOCvTE and NOCvSOC
+rownames(set4) %in% rownames(set5) # one shared among SOCvTE and NOCvTE
+rownames(set5) %in% rownames(set6) # one shared among SOCvTE and NOCvSOC
+
+subset(set4, rownames(set4) %in% rownames(set6)) # LOC118561484 for all - glycerol-3-phosphate acyltransferase 3-like
+subset(set4, rownames(set4) %in% rownames(set5)) 
+subset(set5, rownames(set5) %in% rownames(set6))
+
+# shared response between tissues? No shared genes for a particular pairwise comparison between tissues
+rownames(set1) %in% rownames(set4) 
+rownames(set2) %in% rownames(set5)
+rownames(set3) %in% rownames(set6)
+
+# Overall lists? none
+nrow(subset(all_heart_accl, all_heart_accl %in% all_brain_accl))
+nrow(subset(all_brain_accl, all_brain_accl %in% all_heart_accl))
+
+```
+# shared genes differentiating populations within temps
+```{r}
+# HEART --12
+heart_TEvNOC_12_signif <- subset(heart_TEvNOC_12, heart_TEvNOC_12$padj<0.05)
+heart_TEvSOC_12_signif <- subset(heart_TEvSOC_12, heart_TEvSOC_12$padj<0.05)
+heart_NOCvSOC_12_signif <- subset(heart_NOCvSOC_12, heart_NOCvSOC_12$padj<0.05)
+
+# 15  genes different between NvTE and SvTE
+l1 <- subset(heart_TEvNOC_12_signif, rownames(heart_TEvNOC_12_signif)  %in% rownames(heart_TEvSOC_12_signif))
+
+# 66 shared between NvS and NvTE
+l2 <- subset(heart_NOCvSOC_12_signif, rownames(heart_NOCvSOC_12_signif)  %in% rownames(heart_TEvNOC_12_signif))
+
+# 7 shared between NvS and SvTE
+l3 <- subset(heart_NOCvSOC_12_signif, rownames(heart_NOCvSOC_12_signif)  %in% rownames(heart_TEvSOC_12_signif))
+
+# none shared
+rownames(l1) %in% rownames(l2)
+rownames(l1) %in% rownames(l3)
+rownames(l3) %in% rownames(l2)
+
+# HEART -- 28
+heart_TEvNOC_28_signif <- subset(heart_TEvNOC_28, heart_TEvNOC_28$padj<0.05)
+heart_TEvSOC_28_signif <- subset(heart_TEvSOC_28, heart_TEvSOC_28$padj<0.05)
+heart_NOCvSOC_28_signif <- subset(heart_NOCvSOC_28, heart_NOCvSOC_28$padj<0.05)
+
+# 3 genes different between NvTE and SvTE (28 potentially adaptive)
+l4 <- subset(heart_TEvSOC_28_signif, rownames(heart_TEvSOC_28_signif)  %in% rownames(heart_TEvNOC_28_signif))
+l4
+# 58 shared between NvS and NvTE
+l5 <- subset(heart_TEvNOC_28_signif, rownames(heart_TEvNOC_28_signif)  %in% rownames(heart_NOCvSOC_28_signif))
+
+# 3 shared between NvS and SvTE
+l6 <- subset(heart_NOCvSOC_28_signif, rownames(heart_NOCvSOC_28_signif)  %in% rownames(heart_TEvSOC_28_signif))
+
+# none shared
+rownames(l4) %in% rownames(l5) 
+rownames(l4) %in% rownames(l6) 
+rownames(l5) %in% rownames(l6)
+
+# shared differences among pops between temps? NONE
+rownames(l1) %in% rownames(l4) 
+rownames(l2) %in% rownames(l5) 
+rownames(l3) %in% rownames(l6) 
+
+rownames(heart_TEvSOC_28_signif) %in% rownames(heart_TEvSOC_12_signif)
+rownames(heart_TEvNOC_28_signif) %in% rownames(heart_TEvNOC_12_signif)
+rownames(heart_NOCvSOC_28_signif) %in% rownames(heart_NOCvSOC_12_signif)
+
+```
+
+```{r}
+# brain --12
+brain_TEvNOC_12_signif <- subset(brain_TEvNOC_12, brain_TEvNOC_12$padj<0.05)
+brain_TEvSOC_12_signif <- subset(brain_TEvSOC_12, brain_TEvSOC_12$padj<0.05)
+brain_NOCvSOC_12_signif <- subset(brain_NOCvSOC_12, brain_NOCvSOC_12$padj<0.05)
+
+# 13  genes different between NvTE and SvTE
+b1 <- subset(brain_TEvNOC_12_signif, rownames(brain_TEvNOC_12_signif)  %in% rownames(brain_TEvSOC_12_signif))
+
+# 32 shared between NvS and NvTE
+b2 <- subset(brain_NOCvSOC_12_signif, rownames(brain_NOCvSOC_12_signif)  %in% rownames(brain_TEvNOC_12_signif))
+
+# 5 shared between NvS and SvTE
+b3 <- subset(brain_NOCvSOC_12_signif, rownames(brain_NOCvSOC_12_signif)  %in% rownames(brain_TEvSOC_12_signif))
+
+# none shared
+rownames(b1) %in% rownames(b2)
+rownames(b1) %in% rownames(b3)
+rownames(b3) %in% rownames(b2)
+
+# brain -- 28
+brain_TEvNOC_28_signif <- subset(brain_TEvNOC_28, brain_TEvNOC_28$padj<0.05)
+brain_TEvSOC_28_signif <- subset(brain_TEvSOC_28, brain_TEvSOC_28$padj<0.05)
+brain_NOCvSOC_28_signif <- subset(brain_NOCvSOC_28, brain_NOCvSOC_28$padj<0.05)
+
+# 30  genes different between NvTE and SvTE (28 potentially adaptive)
+b4 <- subset(brain_TEvNOC_28_signif, rownames(brain_TEvNOC_28_signif)  %in% rownames(brain_TEvSOC_28_signif))
+
+# 143 shared between NvS and NvTE
+b5 <- subset(brain_NOCvSOC_28_signif, rownames(brain_NOCvSOC_28_signif)  %in% rownames(brain_TEvNOC_28_signif))
+
+# 16 shared between NvS and SvTE
+b6 <- subset(brain_NOCvSOC_28_signif, rownames(brain_NOCvSOC_28_signif)  %in% rownames(brain_TEvSOC_28_signif))
+
+# none shared
+rownames(b4) %in% rownames(b5) 
+rownames(b4) %in% rownames(b6) 
+rownames(b5) %in% rownames(b6) 
+
+# shared differences among pops between temps?
+rownames(b1) %in% rownames(b4) # none
+rownames(b2) %in% rownames(b5) # none
+rownames(b3) %in% rownames(b6) # none
+
+rownames(brain_TEvSOC_28_signif) %in% rownames(brain_TEvSOC_12_signif) #3 
+rownames(brain_TEvNOC_28_signif) %in% rownames(brain_TEvNOC_12_signif) #1
+rownames(brain_NOCvSOC_28_signif) %in% rownames(brain_NOCvSOC_12_signif) #4
+```
+```{r}
+# Brain unique sets
+brain_temp_NOC_signif_up<- subset(brain_temp_NOC_signif, brain_temp_NOC_signif$log2FoldChange>0)
+brain_temp_SOC_signif_up<- subset(brain_temp_SOC_signif, brain_temp_SOC_signif$log2FoldChange>0)
+brain_temp_TE_signif_up<- subset(brain_temp_TE_signif, brain_temp_TE_signif$log2FoldChange>0)
+
+brain_temp_NOC_signif_down<- subset(brain_temp_NOC_signif, brain_temp_NOC_signif$log2FoldChange<0)
+brain_temp_SOC_signif_down<- subset(brain_temp_SOC_signif, brain_temp_SOC_signif$log2FoldChange<0)
+brain_temp_TE_signif_down<- subset(brain_temp_TE_signif, brain_temp_TE_signif$log2FoldChange<0)
+
+# total up and down regulated
+nrow(brain_temp_NOC_signif_up) #29
+nrow(brain_temp_NOC_signif_down) #197
+
+nrow(brain_temp_SOC_signif_up) #103
+nrow(brain_temp_SOC_signif_down) #131
+
+nrow(brain_temp_TE_signif_up) #16
+nrow(brain_temp_TE_signif_down) #83
+
+# Shared Upregulated
+nrow(subset(brain_temp_NOC_signif_up, rownames(brain_temp_NOC_signif_up) %in% rownames(brain_temp_TE_signif_up) | rownames(brain_temp_NOC_signif_up) %in% rownames(brain_temp_SOC_signif_up))) #0
+
+nrow(subset(brain_temp_SOC_signif_up, rownames(brain_temp_SOC_signif_up) %in% rownames(brain_temp_TE_signif_up) | rownames(brain_temp_SOC_signif_up) %in% rownames(brain_temp_NOC_signif_up))) #0
+
+nrow(subset(brain_temp_TE_signif_up, rownames(brain_temp_TE_signif_up) %in% rownames(brain_temp_NOC_signif_up) | rownames(brain_temp_TE_signif_up) %in% rownames(brain_temp_SOC_signif_up))) #0
+
+# Shared Downregulated
+nrow(subset(brain_temp_NOC_signif_down, rownames(brain_temp_NOC_signif_down) %in% rownames(brain_temp_TE_signif_down) | rownames(brain_temp_NOC_signif_down) %in% rownames(brain_temp_SOC_signif_down))) #12
+
+nrow(subset(brain_temp_SOC_signif_down, rownames(brain_temp_SOC_signif_down) %in% rownames(brain_temp_TE_signif_down) | rownames(brain_temp_SOC_signif_down) %in% rownames(brain_temp_NOC_signif_down))) #11
+
+nrow(subset(brain_temp_TE_signif_down, rownames(brain_temp_TE_signif_down) %in% rownames(brain_temp_NOC_signif_down) | rownames(brain_temp_TE_signif_down) %in% rownames(brain_temp_SOC_signif_down))) #8
+
+```
+
+```{r}
+# Make venn diagram.. 
+library(VennDiagram)
+
+# Prepare a palette of 3 colors with R colorbrewer:
+library(RColorBrewer)
+myCol <- brewer.pal(3, "Pastel2")
+
+# Heart Chart - 12
+venn.diagram(
+        x = list(rownames(heart_TEvNOC_12_signif), rownames(heart_TEvSOC_12_signif), rownames(heart_NOCvSOC_12_signif)),
+        category.names = c("TE vs NOC" , "TE vs SOC " , "NOC vs SOC"),
+        filename = 'Heart_12_pairwise_pops.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-20, 20, 180),
+        cat.dist = c(0.01, 0.01, 0.01),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+# Brain Chart -12
+venn.diagram(
+        x = list(rownames(brain_TEvNOC_12_signif), rownames(brain_TEvSOC_12_signif), rownames(brain_NOCvSOC_12_signif)),
+        category.names = c("TE vs NOC" , "TE vs SOC " , "NOC vs SOC"),
+        filename = 'Brain_12_pairwise_pops.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-20, 20, 180),
+        cat.dist = c(0.01, 0.01, 0.01),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+# Heart Chart - 28
+venn.diagram(
+        x = list(rownames(heart_TEvNOC_28_signif), rownames(heart_TEvSOC_28_signif), rownames(heart_NOCvSOC_28_signif)),
+        category.names = c("TE vs NOC" , "TE vs SOC " , "NOC vs SOC"),
+        filename = 'Heart_28_pairwise_pops.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-20, 20, 180),
+        cat.dist = c(0.01, 0.01, 0.01),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+# Brain Chart -28
+venn.diagram(
+        x = list(rownames(brain_TEvNOC_28_signif), rownames(brain_TEvSOC_28_signif), rownames(brain_NOCvSOC_28_signif)),
+        category.names = c("TE vs NOC" , "TE vs SOC " , "NOC vs SOC"),
+        filename = 'Brain_28_pairwise_pops.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-20, 20, 180),
+        cat.dist = c(0.01, 0.01, 0.01),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+###############################
+# overlap in temp response among pops for each tissue
+# Heart Chart - temp response
+venn.diagram(
+        x = list(rownames(heart_temp_NOC_signif), rownames(heart_temp_SOC_signif), rownames(heart_temp_TE_signif)),
+        category.names = c("N.Ref" , "S.Ref " , "TE"),
+        filename = 'Heart_temp_response_named.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(0, 0, 0),
+        cat.dist = c(0.01, 0.01, -0.03),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+
+# Brain Chart - temp response
+venn.diagram(
+        x = list(rownames(brain_temp_NOC_signif), rownames(brain_temp_SOC_signif), rownames(brain_temp_TE_signif)),
+        category.names = c("N.Ref" , "S.Ref " , "TE"),
+        filename = 'Brain_temp_response_named.png',
+        output=TRUE,
+        
+        # Output features
+        imagetype="png" ,
+        height = 480 , 
+        width = 480 , 
+        resolution = 300,
+        compression = "lzw",
+        
+        # Circles
+        lwd = 2,
+        lty = 'blank',
+        fill = myCol,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.pos = c(-30, 30, 180),
+        cat.dist = c(0.01, 0.01, 0.01),
+        cat.fontfamily = "sans",
+        rotation = 1
+)
+```
+
+```{r}
+## HEARTS - temp response by pop lists
+# combine DGE into PCAs to explain trait variation?
+heart_counts_vst2 <- vst(dds_dge_heart)
+
+temp_SOC_list <- subset(heart_counts_vst2, rownames(heart_counts_vst2) %in% rownames(heart_temp_SOC_signif))
+nrow(temp_SOC_list)
+# PC1 = 18% , PC2 = 10%
+plotPCA(temp_SOC_list, intgroup=c("Population","Cam.Temp"))
+soc_PCA <- plotPCA(temp_SOC_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+temp_NOC_list <- subset(heart_counts_vst2, rownames(heart_counts_vst2) %in% rownames(heart_temp_NOC_signif))
+nrow(temp_NOC_list)
+# PC1 = 13%
+plotPCA(temp_NOC_list, intgroup=c("Population","Cam.Temp"))
+noc_PCA <- plotPCA(temp_NOC_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+temp_TE_list <- subset(heart_counts_vst2, rownames(heart_counts_vst2) %in% rownames(heart_temp_TE_signif))
+nrow(temp_TE_list)
+# PC2 = 8%
+plotPCA(temp_TE_list, intgroup=c("Population","Cam.Temp"))
+te_PCA <- plotPCA(temp_TE_list, intgroup=c("Population","Cam.Temp", "sample.ID"), returnData=TRUE)
+
+```
+```{r}
+# Save lists
+#write.csv(rownames(temp_SOC_list), "Heart_SOC_accl_list.csv")
+#write.csv(rownames(temp_NOC_list), "Heart_NOC_accl_list.csv")
+#write.csv(rownames(temp_TE_list), "Heart_TE_accl_list.csv")
+
+```
+
+
+```{R}
+soc_PCA <- as.data.frame(soc_PCA)
+noc_PCA <- as.data.frame(noc_PCA)
+te_PCA <- as.data.frame(te_PCA)
+
+soc_PCA$PC1_soc <- soc_PCA$PC1
+soc_PCA$PC2_soc <- soc_PCA$PC2
+noc_PCA$PC1_noc <- noc_PCA$PC1
+noc_PCA$PC2_noc <- noc_PCA$PC2
+te_PCA$PC1_te <- te_PCA$PC1
+te_PCA$PC2_te <- te_PCA$PC2
+
+soc_PCA <- soc_PCA[,c(6,8:9)]
+noc_PCA <- noc_PCA[,c(6,8:9)]
+te_PCA <- te_PCA[,c(6,8:9)]
+
+
+pcas_merged <- merge(soc_PCA, noc_PCA, by="sample.ID")
+pcas_merged <- merge(pcas_merged, te_PCA, by="sample.ID")
+
+pca_meta <- merge(pcas_merged, physio2, by="sample.ID")
+```
+
+```{r}
+pca_meta <- subset(pca_meta, pca_meta$FA.CamMass.Residuals!=" ")
+pca_meta <- subset(pca_meta, pca_meta$LKA..CamMass.Residuals!=" ")
+pca_meta <- subset(pca_meta, pca_meta$Log.Log.WAM.Mass.residuals!=" ")
+
+pca_meta$Log.Log.WAM.Mass.residuals <- as.numeric(pca_meta$Log.Log.WAM.Mass.residuals)
+pca_meta$FA.CamMass.Residuals <- as.numeric(pca_meta$FA.CamMass.Residuals)
+pca_meta$GLU.CamMass.Residuals <- as.numeric(pca_meta$GLU.CamMass.Residuals)
+pca_meta$LKA..CamMass.Residuals <- as.numeric(pca_meta$LKA..CamMass.Residuals)
+pca_meta$END.CamMass.Residuals <- as.numeric(pca_meta$END.CamMass.Residuals)
+pca_meta$CTMax.WAM.Mass.Residuals <- as.numeric(pca_meta$CTMax.WAM.Mass.Residuals)
+
+# soc_PC1 - none
+# soc_PC2
+# camtemp*PCA, P = 0.052, R2 = 0.20
+summary(lm(pca_meta$GLU.CamMass.Residuals ~pca_meta$PC2_soc*pca_meta$Cam.Temp))
+ggplot(data=pca_meta, aes(x=PC2_soc, y=GLU.CamMass.Residuals, col=Cam.Temp)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  scale_color_manual(values=c("blue","orange")) +
+  theme_bw()
+
+# noc_PC1 - none 
+# te_PC2 - none 
+
+```
+```{r}
+## BRAINS - temp response by pop lists
+brain_counts_vst2 <- vst(dds_dge_brain)
+
+# combine DGE into PCAs to explain trait variation?
+btemp_SOC_list <- subset(brain_counts_vst2, rownames(brain_counts_vst2) %in% rownames(brain_temp_SOC_signif))
+
+# PC1 = 9%
+plotPCA(btemp_SOC_list, intgroup=c("Population","Cam.Temp"))
+bsoc_PCA <- plotPCA(btemp_SOC_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+btemp_NOC_list <- subset(brain_counts_vst2, rownames(brain_counts_vst2) %in% rownames(brain_temp_NOC_signif))
+
+# PC1 = 9%
+plotPCA(btemp_NOC_list, intgroup=c("Population","Cam.Temp"))
+bnoc_PCA <- plotPCA(btemp_NOC_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+btemp_TE_list <- subset(brain_counts_vst2, rownames(brain_counts_vst2) %in% rownames(brain_temp_TE_signif))
+```
+
+```{r}
+# save lists
+#write.csv(rownames(btemp_SOC_list), "Brain_SOC_accl_list.csv")
+#write.csv(rownames(btemp_NOC_list), "Brain_NOC_accl_list.csv")
+#write.csv(rownames(btemp_TE_list), "Brain_TE_accl_list.csv")
+
+```
+
+```{r}
+## HEARTS - PC of DGEs among populations
+# combine DGE into PCAs to explain trait variation?
+names_12 <- colnames(heart_counts_12)
+keep_12 <- heart_counts_vst2$sample.ID %in% names_12
+heart_counts_12_vst <- heart_counts_vst2[,keep_12]
+ncol(heart_counts_12_vst)
+
+names_28 <- colnames(heart_counts_28)
+keep_28 <- heart_counts_vst2$sample.ID %in% names_28
+heart_counts_28_vst <- heart_counts_vst2[,keep_28]
+ncol(heart_counts_28_vst)
+
+TEvSOC_list_12 <- subset(heart_counts_12_vst, rownames(heart_counts_12_vst) %in% rownames(heart_TEvSOC_12_signif))
+
+TEvNOC_list_12 <- subset(heart_counts_12_vst, rownames(heart_counts_12_vst) %in% rownames(heart_TEvNOC_12_signif))
+
+NOCvSOC_list_12 <- subset(heart_counts_12_vst, rownames(heart_counts_12_vst) %in% rownames(heart_temp_TE_signif))
+
+#### 28°C ####
+TEvSOC_list_28 <- subset(heart_counts_28_vst, rownames(heart_counts_28_vst) %in% rownames(heart_TEvSOC_28_signif))
+
+TEvNOC_list_28 <- subset(heart_counts_28_vst, rownames(heart_counts_28_vst) %in% rownames(heart_TEvNOC_28_signif))
+
+NOCvSOC_list_28 <- subset(heart_counts_28_vst, rownames(heart_counts_28_vst) %in% rownames(heart_temp_TE_signif))
+
+```
+
+```{r}
+# save lists
+#write.csv(rownames(TEvSOC_list_12), "Heart_TEvSOC_12.csv")
+#write.csv(rownames(TEvNOC_list_12), "Heart_TEvNOC_12.csv")
+#write.csv(rownames(NOCvSOC_list_12), "Heart_NOCvSOC_12.csv")
+
+#write.csv(rownames(TEvSOC_list_28), "Heart_TEvSOC_28.csv")
+#write.csv(rownames(TEvNOC_list_28), "Heart_TEvNOC_28.csv")
+#write.csv(rownames(NOCvSOC_list_28), "Heart_NOCvSOC_28.csv")
+```
+
+```{r}
+## BRAINS - PC of DGEs among populations
+# combine DGE into PCAs to explain trait variation?
+names_12 <- colnames(brain_counts_12)
+keep_12 <- brain_counts_vst2$sample.ID %in% names_12
+brain_counts_12_vst <- brain_counts_vst2[,keep_12]
+ncol(brain_counts_12_vst)
+
+names_28 <- colnames(brain_counts_28)
+keep_28 <- brain_counts_vst2$sample.ID %in% names_28
+brain_counts_28_vst <- brain_counts_vst2[,keep_28]
+ncol(brain_counts_28_vst)
+
+brain_TEvSOC_list_12 <- subset(brain_counts_12_vst, rownames(brain_counts_12_vst) %in% rownames(brain_TEvSOC_12_signif))
+
+brain_TEvNOC_list_12 <- subset(brain_counts_12_vst, rownames(brain_counts_12_vst) %in% rownames(brain_TEvNOC_12_signif))
+
+brain_NOCvSOC_list_12 <- subset(brain_counts_12_vst, rownames(brain_counts_12_vst) %in% rownames(brain_temp_TE_signif))
+
+#### 28°C ####
+brain_TEvSOC_list_28 <- subset(brain_counts_28_vst, rownames(brain_counts_28_vst) %in% rownames(brain_TEvSOC_28_signif))
+
+brain_TEvNOC_list_28 <- subset(brain_counts_28_vst, rownames(brain_counts_28_vst) %in% rownames(brain_TEvNOC_28_signif))
+
+brain_NOCvSOC_list_28 <- subset(brain_counts_28_vst, rownames(brain_counts_28_vst) %in% rownames(brain_temp_TE_signif))
+
+```
+
+```{r}
+# save lists
+#write.csv(rownames(brain_TEvSOC_list_12), "Brain_TEvSOC_12.csv")
+#write.csv(rownames(brain_TEvNOC_list_12), "Brain_TEvNOC_12.csv")
+#write.csv(rownames(brain_NOCvSOC_list_12), "Brain_NOCvSOC_12.csv")
+
+#write.csv(rownames(brain_TEvSOC_list_28), "Brain_TEvSOC_28.csv")
+#write.csv(rownames(brain_TEvNOC_list_28), "Brain_TEvNOC_28.csv")
+#write.csv(rownames(brain_NOCvSOC_list_28), "Brain_NOCvSOC_28.csv")
+```
+
+```{r}
+# compare lists
+heart_all_temp <- c(rownames(temp_SOC_list), rownames(temp_NOC_list), rownames(temp_TE_list))
+heart_all_pop_12 <- c(rownames(TEvNOC_list_12), rownames(TEvSOC_list_12), rownames(NOCvSOC_list_12))
+heart_all_pop_28 <- c(rownames(TEvNOC_list_28), rownames(TEvSOC_list_28), rownames(NOCvSOC_list_28))
+heart_all_pop <- c(heart_all_pop_12, heart_all_pop_28)
+
+
+brain_all_temp <- c(rownames(btemp_SOC_list), rownames(btemp_NOC_list), rownames(btemp_TE_list))
+brain_all_pop_12 <- c(rownames(brain_TEvNOC_list_12), rownames(brain_TEvSOC_list_12), rownames(brain_NOCvSOC_list_12))
+brain_all_pop_28 <- c(rownames(brain_TEvNOC_list_28), rownames(brain_TEvSOC_list_28), rownames(brain_NOCvSOC_list_28))
+brain_all_pop <- c(brain_all_pop_12, brain_all_pop_28)
+
+# out of 10535 -- average = 0.533
+length(TEvNOC_list_12) #72  0.68
+length(TEvSOC_list_12) #33  0.31
+length(NOCvSOC_list_12) #63  0.60
+length(TEvNOC_list_28) #86  0.82
+length(TEvSOC_list_28) #20  0.19
+length(NOCvSOC_list_28) #63  0.60
+
+# out of 10932 -- average = 1.075
+length(brain_TEvNOC_list_12) #63  0.58
+length(brain_TEvSOC_list_12) #155  1.47
+length(brain_NOCvSOC_list_12) #99  0.91
+length(brain_TEvNOC_list_28) #169  1.55
+length(brain_TEvSOC_list_28) #113  1.03
+length(brain_NOCvSOC_list_28) #99  0.91
+
+heart_all_temp <- unique(heart_all_temp)
+brain_all_temp <- unique(brain_all_temp)
+heart_all_pop <- unique(heart_all_pop)
+brain_all_pop <- unique(brain_all_pop)
+
+subset(heart_all_temp, heart_all_temp %in% brain_all_temp) #10
+
+length(heart_all_temp) #362 (3.4%)
+length(brain_all_temp) #529 (4.84%)
+length(heart_all_pop) #249 (2.36%)
+length(brain_all_pop) #524 (4.79%)
+
+# overlap with population differences?
+length(subset(heart_all_temp, heart_all_temp %in% heart_all_pop)) #135 out of 362
+
+length(subset(brain_all_temp, brain_all_temp %in% brain_all_pop)) #243 out of 529
+
+```
+
+
+```{r}
+# KEGG for the acclimation lists
+emapper_annot <- read.csv("funhe_annotations_eggnog_mapper_2021.csv")
+
+emapper_annot$KEGG_ko <- as.character(emapper_annot$KEGG_ko)
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") %>%
+  mutate(KEGG_ko = str_remove(KEGG_ko, "ko:")) %>% 
+  unite(x, c(Preferred_name, KEGG_ko), sep = " = ", remove = TRUE) -> mapped_KEGG
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") -> column_kegg
+
+column_kegg$term  <- column_kegg$KEGG_ko
+column_kegg$gene <- column_kegg$Preferred_name
+column_kegg <- column_kegg[,3:4]
+
+# pull out background set to map
+all_mRNAs <- rownames(heart_counts_dds2)
+
+# annotate just these
+all_mRNAs_upper <- lapply(all_mRNAs, function(x) toupper(x))
+all_mRNAs_upper  <- as.character(all_mRNAs_upper )
+
+genelist1 <- lapply(rownames(btemp_SOC_list), function(x) toupper(x))
+genelist2 <- lapply(rownames(btemp_NOC_list), function(x) toupper(x))
+genelist3 <- lapply(rownames(btemp_TE_list), function(x) toupper(x))
+
+genelist <- c(genelist1, genelist2, genelist3)
+
+#library(clusterProfiler)
+brain_ALL_kegg <- enricher(genelist, universe=all_mRNAs_upper, TERM2GENE = column_kegg, minGSSize = 1, maxGSSize=1000, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+#heart_NOC_kegg
+#heart_TE_kegg
+#heart_SOC_kegg
+#heart_ALL_kegg
+#brain_NOC_kegg 
+#brain_TE_kegg
+#brain_SOC_kegg
+#brain_ALL_kegg
+
+#write.csv(heart_NOC_kegg, "heart_NOC_accl.txt")
+#write.csv(heart_TE_kegg, "heart_TE_accl.txt")
+#write.csv(heart_SOC_kegg, "heart_SOC_accl.txt")
+#write.csv(heart_ALL_kegg, "heart_ALL_accl.txt")
+
+#write.csv(brain_NOC_kegg, "brain_NOC_accl.txt")
+#write.csv(brain_TE_kegg, "brain_TE_accl.txt")
+#write.csv(brain_SOC_kegg, "brain_SOC_accl.txt")
+#write.csv(brain_ALL_kegg, "brain_ALL_accl.txt")
+
+```
+
+```{r}
+# lists of "potentially adaptive" mRNAs - by tissue and temperature
+'%ni%' <- Negate('%in%')
+# heart - 12
+heart_12_candidates <- subset(heart_TEvSOC_12_signif, rownames(heart_TEvSOC_12_signif) %in% rownames(heart_TEvNOC_12_signif))
+
+heart_12_candidates <- subset(heart_12_candidates, rownames(heart_12_candidates) %ni% rownames(heart_NOCvSOC_12_signif))
+nrow(heart_12_candidates) #10
+
+# heart - 28
+heart_28_candidates <- subset(heart_TEvSOC_28_signif, rownames(heart_TEvSOC_28_signif) %in% rownames(heart_TEvNOC_28_signif))
+nrow(heart_28_candidates)
+
+heart_28_candidates <- subset(heart_28_candidates, rownames(heart_28_candidates) %ni% rownames(heart_NOCvSOC_28_signif))
+nrow(heart_28_candidates) #3
+
+# brain - 12
+brain_12_candidates <- subset(brain_TEvSOC_12_signif, rownames(brain_TEvSOC_12_signif) %in% rownames(brain_TEvNOC_12_signif))
+
+brain_12_candidates <- subset(brain_12_candidates, rownames(brain_12_candidates) %ni% rownames(brain_NOCvSOC_12_signif))
+nrow(brain_12_candidates) # 11
+
+# brain - 28 
+brain_28_candidates <- subset(brain_TEvSOC_28_signif, rownames(brain_TEvSOC_28_signif) %in% rownames(brain_TEvNOC_28_signif))
+
+brain_28_candidates <- subset(brain_28_candidates, rownames(brain_28_candidates) %ni% rownames(brain_NOCvSOC_28_signif))
+nrow(brain_28_candidates) #27
+```
+```{r}
+# KEGG for potentially adaptive lists
+emapper_annot <- read.csv("funhe_annotations_eggnog_mapper_2021.csv")
+
+emapper_annot$KEGG_ko <- as.character(emapper_annot$KEGG_ko)
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") %>%
+  mutate(KEGG_ko = str_remove(KEGG_ko, "ko:")) %>% 
+  unite(x, c(Preferred_name, KEGG_ko), sep = " = ", remove = TRUE) -> mapped_KEGG
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") -> column_kegg
+
+column_kegg$term  <- column_kegg$KEGG_ko
+column_kegg$gene <- column_kegg$Preferred_name
+column_kegg <- column_kegg[,3:4]
+
+# pull out background set to map
+all_mRNAs <- rownames(heart_counts_dds2)
+
+# annotate just these
+all_mRNAs_upper <- lapply(all_mRNAs, function(x) toupper(x))
+all_mRNAs_upper  <- as.character(all_mRNAs_upper )
+
+genelist1 <- lapply(rownames(heart_12_candidates), function(x) toupper(x))
+genelist2 <- lapply(rownames(heart_28_candidates), function(x) toupper(x))
+genelist3 <- lapply(rownames(rownames(brain_12_candidates)), function(x) toupper(x))
+genelist4 <- lapply(rownames(rownames(brain_28_candidates)), function(x) toupper(x))
+
+genelist5 <- lapply(rownames(heart_NOCvSOC_12_signif), function(x) toupper(x))
+genelist6 <- lapply(rownames(heart_NOCvSOC_28_signif), function(x) toupper(x))
+genelist7<- lapply(rownames(brain_NOCvSOC_12_signif), function(x) toupper(x))
+genelist8 <- lapply(rownames(brain_NOCvSOC_28_signif), function(x) toupper(x))
+
+#library(clusterProfiler)
+brain28_NvS_kegg <- enricher(genelist8, universe=all_mRNAs_upper, TERM2GENE = column_kegg, minGSSize = 1, maxGSSize=1000, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+
+
+heart12_NvS_kegg #6 enriched terms
+heart28_NvS_kegg #9 enriched terms
+brain12_NvS_kegg #4 enriched terms
+brain28_NvS_kegg #9 enriched terms
+```
+
+
+```{r}
+#Make candidate mRNAs into PCs 
+#heart -12
+heart_12_candidates_list <- subset(heart_counts_12_vst, rownames(heart_counts_12_vst) %in% rownames(heart_12_candidates))
+
+# PC1 = 32%
+plotPCA(heart_12_candidates_list, intgroup=c("Population"))
+heart_12_cand_pca <- plotPCA(heart_12_candidates_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+# heart - 28 
+heart_28_candidates_list <- subset(heart_counts_28_vst, rownames(heart_counts_28_vst) %in% rownames(heart_28_candidates))
+
+# PC1 = 29%
+plotPCA(heart_28_candidates_list, intgroup=c("Population"))
+heart_28_cand_pca <- plotPCA(heart_28_candidates_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+# brain - 12
+brain_12_candidates_list <- subset(brain_counts_12_vst, rownames(brain_counts_12_vst) %in% rownames(brain_12_candidates))
+
+# PC1 = 33%
+plotPCA(brain_12_candidates_list, intgroup=c("Population"))
+brain_12_cand_pca <- plotPCA(brain_12_candidates_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+
+# brain - 28 
+brain_28_candidates_list <- subset(brain_counts_28_vst, rownames(brain_counts_28_vst) %in% rownames(brain_28_candidates))
+
+# PC1 = 28%
+plotPCA(brain_28_candidates_list, intgroup=c("Population"))
+brain_28_cand_pca <- plotPCA(brain_28_candidates_list, intgroup=c("Population","Cam.Temp","sample.ID"), returnData=TRUE)
+```
+
+```{r}
+# make candidate gene PCA data frames 
+# format PCAs into df for lm analysis
+heart_12_cand_pca  <- as.data.frame(heart_12_cand_pca)
+heart_28_cand_pca <- as.data.frame(heart_28_cand_pca)
+brain_12_cand_pca <- as.data.frame(brain_12_cand_pca)
+brain_28_cand_pca <- as.data.frame(brain_28_cand_pca)
+
+heart_12_cand_pca$PC1_h_12  <- heart_12_cand_pca$PC1
+heart_28_cand_pca$PC1_h_28 <- heart_28_cand_pca$PC1
+brain_12_cand_pca$PC1_b_12 <- brain_12_cand_pca$PC1
+brain_28_cand_pca$PC1_b_28 <- brain_28_cand_pca$PC1
+
+heart_12_cand_pca <- heart_12_cand_pca[,c(6,8)]
+heart_28_cand_pca <- heart_28_cand_pca[,c(6,8)]
+brain_12_cand_pca <- brain_12_cand_pca[,c(6,8)]
+brain_28_cand_pca <- brain_28_cand_pca[,c(6,8)]
+
+heart_12_cand_merged <- merge(heart_12_cand_pca, physio2, by="sample.ID")
+heart_28_cand_merged <- merge(heart_28_cand_pca, physio2, by="sample.ID")
+brain_12_cand_merged <- merge(brain_12_cand_pca, physio2_brain, by="sample.ID")
+brain_28_cand_merged <- merge(brain_28_cand_pca, physio2_brain, by="sample.ID")
+
+```
+
+```{r}
+# prep data frames for linear models
+heart_12_cand_merged <- as.data.frame(heart_12_cand_merged)
+heart_28_cand_merged <- as.data.frame(heart_28_cand_merged)
+brain_12_cand_merged <- as.data.frame(brain_12_cand_merged)
+brain_28_cand_merged <- as.data.frame(brain_28_cand_merged)
+
+heart_12_cand_merged$Log.Log.WAM.Mass.residuals <- as.numeric(heart_12_cand_merged$Log.Log.WAM.Mass.residuals)
+heart_12_cand_merged$CTMax.WAM.Mass.Residuals <- as.numeric(heart_12_cand_merged$CTMax.WAM.Mass.Residuals)
+heart_12_cand_merged$GLU.CamMass.Residuals <- as.numeric(heart_12_cand_merged$GLU.CamMass.Residuals)
+heart_12_cand_merged$FA.CamMass.Residuals <- as.numeric(heart_12_cand_merged$FA.CamMass.Residuals)
+heart_12_cand_merged$LKA..CamMass.Residuals <- as.numeric(heart_12_cand_merged$LKA..CamMass.Residuals)
+heart_12_cand_merged$END.CamMass.Residuals <- as.numeric(heart_12_cand_merged$END.CamMass.Residuals)
+
+heart_28_cand_merged$Log.Log.WAM.Mass.residuals <- as.numeric(heart_28_cand_merged$Log.Log.WAM.Mass.residuals)
+heart_28_cand_merged$CTMax.WAM.Mass.Residuals <- as.numeric(heart_28_cand_merged$CTMax.WAM.Mass.Residuals)
+heart_28_cand_merged$GLU.CamMass.Residuals <- as.numeric(heart_28_cand_merged$GLU.CamMass.Residuals)
+heart_28_cand_merged$FA.CamMass.Residuals <- as.numeric(heart_28_cand_merged$FA.CamMass.Residuals)
+heart_28_cand_merged$LKA..CamMass.Residuals <- as.numeric(heart_28_cand_merged$LKA..CamMass.Residuals)
+heart_28_cand_merged$END.CamMass.Residuals <- as.numeric(heart_28_cand_merged$END.CamMass.Residuals)
+
+brain_12_cand_merged$Log.Log.WAM.Mass.residuals <- as.numeric(brain_12_cand_merged$Log.Log.WAM.Mass.residuals)
+brain_12_cand_merged$CTMax.WAM.Mass.Residuals <- as.numeric(brain_12_cand_merged$CTMax.WAM.Mass.Residuals)
+brain_12_cand_merged$GLU.CamMass.Residuals <- as.numeric(brain_12_cand_merged$GLU.CamMass.Residuals)
+brain_12_cand_merged$FA.CamMass.Residuals <- as.numeric(brain_12_cand_merged$FA.CamMass.Residuals)
+brain_12_cand_merged$LKA..CamMass.Residuals <- as.numeric(brain_12_cand_merged$LKA..CamMass.Residuals)
+brain_12_cand_merged$END.CamMass.Residuals <- as.numeric(brain_12_cand_merged$END.CamMass.Residuals)
+
+brain_28_cand_merged$Log.Log.WAM.Mass.residuals <- as.numeric(brain_28_cand_merged$Log.Log.WAM.Mass.residuals)
+brain_28_cand_merged$CTMax.WAM.Mass.Residuals <- as.numeric(brain_28_cand_merged$CTMax.WAM.Mass.Residuals)
+brain_28_cand_merged$GLU.CamMass.Residuals <- as.numeric(brain_28_cand_merged$GLU.CamMass.Residuals)
+brain_28_cand_merged$FA.CamMass.Residuals <- as.numeric(brain_28_cand_merged$FA.CamMass.Residuals)
+brain_28_cand_merged$LKA..CamMass.Residuals <- as.numeric(brain_28_cand_merged$LKA..CamMass.Residuals)
+brain_28_cand_merged$END.CamMass.Residuals <- as.numeric(brain_28_cand_merged$END.CamMass.Residuals)
+
+```
+
+```{r}
+# heart 12 - CTMAX*SOC p = 0.0456, R2 = 0.364
+heart_12_cand_merged$Population <- as.factor(heart_12_cand_merged$Population)
+summary(lm(heart_12_cand_merged$CTMax.WAM.Mass.Residuals~heart_12_cand_merged$PC1_h_12*heart_12_cand_merged$Population))
+ggplot(data=heart_12_cand_merged, aes(x=PC1_h_12, y=CTMax.WAM.Mass.Residuals, col=Population)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+# do candidate mRNAs explain pop specific traits?
+sub_te <- subset(heart_12_cand_merged, heart_12_cand_merged$Population=="OCE")
+# GLU p =  0.05218 R2=0.49
+summary(lm(sub_te$GLU.CamMass.Residuals~sub_te$PC1_h_12))
+ggplot(data=sub_te, aes(x=PC1_h_12, y=GLU.CamMass.Residuals, col=Population)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+
+# heart 28, 
+# WAM*SOC p= 0.021, R2=0.4449
+summary(lm(heart_28_cand_merged$Log.Log.WAM.Mass.residuals~heart_28_cand_merged$PC1_h_28*heart_28_cand_merged$Population))
+ggplot(data=heart_28_cand_merged, aes(x=PC1_h_28, y=Log.Log.WAM.Mass.residuals, col=Population)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+summary(lm(heart_28_cand_merged$GLU.CamMass.Residuals~heart_28_cand_merged$PC1_h_28*heart_28_cand_merged$Population))
+ggplot(data=heart_28_cand_merged, aes(x=PC1_h_28, y=GLU.CamMass.Residuals, col=Population)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+# do candidate mRNAs explain pop specific traits?
+sub_te <- subset(heart_28_cand_merged, heart_28_cand_merged$Population=="OCE")
+# GLU p = 0.0771 R2 = 0.58
+summary(lm(sub_te$GLU.CamMass.Residuals~sub_te$PC1_h_28))
+
+##########################3
+brain_12_cand_merged$Population <- as.factor(brain_12_cand_merged$Population)
+# brain 12 -  GLU*pop p = 0.031, R2=0.512, FA*pop  p = 0.004, R2 = 0.64
+summary(lm(brain_12_cand_merged$GLU.CamMass.Residuals~brain_12_cand_merged$PC1_b_12*brain_12_cand_merged$Population))
+ggplot(data=brain_12_cand_merged, aes(x=PC1_b_12, y=GLU.CamMass.Residuals, col=Population)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw() +
+  scale_color_manual(values=c("blue","red","purple"))
+
+summary(lm(brain_12_cand_merged$FA.CamMass.Residuals~brain_12_cand_merged$PC1_b_12*brain_12_cand_merged$Population))
+ggplot(data=brain_12_cand_merged, aes(x=PC1_b_12, y=FA.CamMass.Residuals, col=Population)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw() +
+  scale_color_manual(values=c("blue","red","purple"))
+
+# do candidate mRNAs explain pop specific traits?
+sub_te <- subset(brain_12_cand_merged, brain_12_cand_merged$Population=="OCE")
+# yes - WAM  p = 0.0131 *, R2=0.8193, N=6
+summary(lm(sub_te$Log.Log.WAM.Mass.residuals~sub_te$PC1_b_12))
+ggplot(data=sub_te, aes(x=PC1_b_12, y=Log.Log.WAM.Mass.residuals, col=Population)) +
+  geom_point(col="black") +
+  geom_smooth(method="lm", col="red") +
+  theme_bw() 
+
+# brain 28 - none 
+brain_28_cand_merged$Population <- as.factor(brain_28_cand_merged$Population)
+summary(lm(brain_28_cand_merged$Log.Log.WAM.Mass.residuals~brain_28_cand_merged$PC1_b_28*brain_28_cand_merged$Population))
+
+# do candidate mRNAs explain pop specific traits?
+sub_te <- subset(brain_28_cand_merged, brain_28_cand_merged$Population=="OCE")
+summary(lm(sub_te$CTMax.WAM.Mass.Residuals~sub_te$PC1_b_28))
+ggplot(data=sub_te, aes(x=PC1_b_28, y=CTMax.WAM.Mass.Residuals, col=Population)) +
+  geom_point(col="black") +
+  geom_smooth(method="lm", col="red") +
+  theme_bw() 
+
+```
+
+```{r}
+# Figure 1
+# plot of shared and unique genes
+temp_unique <- read.csv("temp_shared_unique_RNA.csv")
+temp_unique$total_up <- as.numeric(temp_unique$total_up)
+temp_unique_heart <- temp_unique[1:3,]
+
+temp_unique_heart$Comparison <- factor(temp_unique_heart$Comparison, levels = c("heart_temp_NOC", "heart_temp_TE", "heart_temp_SOC"))
+
+ggplot(data=temp_unique_heart, aes(x=Comparison)) +
+  geom_bar(aes(y=total_up), stat="identity", position ="identity", alpha=.9, fill='white', color='black') +
+  geom_bar(aes(y=upregulated_unique), stat="identity", position="identity", alpha=1, fill='black', color='black') + 
+   geom_bar(aes(y=total_down), stat="identity", position ="identity", alpha=.9, fill='white', color='black') +
+  geom_bar(aes(y=downregulated_unique), stat="identity", position="identity", alpha=1, fill='lightgrey', color='black') +
+    geom_hline(yintercept=0) + 
+  theme_bw()
+
+temp_unique_brain <- temp_unique[4:6,]
+temp_unique_brain$Comparison <- factor(temp_unique_brain$Comparison, levels = c("brain_temp_NOC", "brain_temp_TE", "brain_temp_SOC"))
+ggplot(data=temp_unique_brain, aes(x=Comparison)) +
+  geom_bar(aes(y=total_up), stat="identity", position ="identity", alpha=.9, fill='white', color='black') +
+  geom_bar(aes(y=upregulated_unique), stat="identity", position="identity", alpha=1, fill='black', color='black') + 
+   geom_bar(aes(y=total_down), stat="identity", position ="identity", alpha=.9, fill='white', color='black') +
+  geom_bar(aes(y=downregulated_unique), stat="identity", position="identity", alpha=1, fill='lightgrey', color='black') +
+  geom_hline(yintercept=0) + 
+  theme_bw()
+```
+```{r}
+# Chi-square test -- is population independent of # up and down regulated genes
+temp_unique_heart$downregulated_unique <- abs(temp_unique_heart$downregulated_unique)
+temp_unique_heart$total_down <- abs(temp_unique_heart$total_down)
+rownames(temp_unique_heart) <- temp_unique_heart$Comparison
+temp_unique_heart <- temp_unique_heart[,2:5]
+temp_unique_heart
+
+## X-squared = 37.16, df = 6, p-value = 1.639e-06
+chisq.test(temp_unique_heart)
+
+
+temp_unique_brain$downregulated_unique <- abs(temp_unique_brain$downregulated_unique)
+temp_unique_brain$total_down <- abs(temp_unique_brain$total_down)
+rownames(temp_unique_brain) <- temp_unique_brain$Comparison
+temp_unique_brain <- temp_unique_brain[,2:5]
+temp_unique_brain
+
+## X-squared = 125.22, df = 6, p-value < 2.2e-16
+chisq.test(temp_unique_brain)
+```
+
+## functions for PCA axes 2 and 3, 3 and 4
+```{r Pretty PCs}
+#PCA 2 and 3 axis creation
+pcaaxes23 = function (object, intgroup = "condition", ntop = 500, returnData = FALSE) 
+{
+    rv <- rowVars(assay(object))
+    select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, 
+        length(rv)))]
+    pca <- prcomp(t(assay(object)[select, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(object)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(object)[, intgroup, 
+        drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = ":"))
+    }
+    else {
+        colData(object)[[intgroup]]
+    }
+    d <- data.frame(PC2 = pca$x[, 2], PC3 = pca$x[, 3], group = group, 
+        intgroup.df, name = colnames(object))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[2:3]
+        return(d)
+    }
+    ggplot(data = d, aes_string(x = "PC2", y = "PC3", color = "group")) + 
+        geom_point(size = 3) + xlab(paste0("PC2: ", round(percentVar[2] * 
+        100), "% variance")) + ylab(paste0("PC3: ", round(percentVar[3] * 
+        100), "% variance")) + coord_fixed()
+}
+
+#PCA 3 and 4 axis creation
+pcaaxes34 = function (object, intgroup = "condition", ntop = 500, returnData = FALSE) 
+{
+    rv <- rowVars(assay(object))
+    select <- order(rv, decreasing = TRUE)[seq_len(min(ntop, 
+        length(rv)))]
+    pca <- prcomp(t(assay(object)[select, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(object)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(object)[, intgroup, 
+        drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = ":"))
+    }
+    else {
+        colData(object)[[intgroup]]
+    }
+    d <- data.frame(PC3 = pca$x[, 3], PC4 = pca$x[, 4], group = group, 
+        intgroup.df, name = colnames(object))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[3:4]
+        return(d)
+    }
+    ggplot(data = d, aes_string(x = "PC3", y = "PC4", color = "group")) + 
+        geom_point(size = 3) + xlab(paste0("PC3: ", round(percentVar[3] * 
+        100), "% variance")) + ylab(paste0("PC4: ", round(percentVar[4] * 
+        100), "% variance")) + coord_fixed()
+}
+```

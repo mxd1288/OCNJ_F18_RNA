@@ -1,0 +1,3050 @@
+---
+title: "WGCNA_OCNJ_F18"
+author: "Melissa Drown"
+date: "4/13/2021"
+output: html_document
+---
+
+```{r install package}
+library(WGCNA)
+library(tidyr)
+library(dplyr)
+library(fastDummies)
+options(stringsAsFactors = FALSE)
+
+```
+
+```{r load expression data}
+physio <- read.csv("cDNA_metadata_phenotypes.csv")
+meta <- read.csv("cDNA_F18_OCNJ_MKD_metadata.csv")
+counts <- read.csv("OCNJ_F18_counts_2lanes.csv")
+cam_groups <- read.csv("CaM_groups.csv")
+
+data <- counts[ ,7:ncol(counts)]
+
+# filter out reads with count of 0
+# from 34686 to 24636 genes
+raw_counts<- data[rowSums(data) > 0,]
+
+read_depth <- colSums(data)
+hist(read_depth, breaks=20)
+
+counts_per_gene <- rowSums(data)
+hist(counts_per_gene, breaks=20)
+# 4725.549 counts per gene before filtering
+mean(counts_per_gene)
+
+raw_counts<- data[,colSums(data) > 1000000]
+sample_names_keep <-  colnames(raw_counts)
+
+hist(colSums(raw_counts), breaks=20)
+```
+
+```{r}
+# Assign top substrate
+physio[is.na(physio)] <- " "
+
+physio <- physio %>% mutate( 
+  top_substrate = ifelse(GLU.CamMass.Residuals > FA.CamMass.Residuals &
+         GLU.CamMass.Residuals > END.CamMass.Residuals &
+         GLU.CamMass.Residuals > LKA..CamMass.Residuals, "GLU",
+  ifelse(FA.CamMass.Residuals > GLU.CamMass.Residuals &
+         FA.CamMass.Residuals > END.CamMass.Residuals &
+           FA.CamMass.Residuals > LKA..CamMass.Residuals, "FA",
+  ifelse(LKA..CamMass.Residuals > GLU.CamMass.Residuals &
+           LKA..CamMass.Residuals > FA.CamMass.Residuals &
+           LKA..CamMass.Residuals > END.CamMass.Residuals, "LKA",
+  ifelse(END.CamMass.Residuals > GLU.CamMass.Residuals &
+           END.CamMass.Residuals > FA.CamMass.Residuals &
+           END.CamMass.Residuals > LKA..CamMass.Residuals, "END", "NA")
+))))
+
+```
+
+```{r, assign new groups}
+cam_groups <- cam_groups%>% mutate( 
+  new_group = ifelse(group.ID =="group1", "G1",
+  ifelse(group.ID=="group2", "G1",
+  ifelse(group.ID=="group3", "G2",
+  ifelse(group.ID=="group4", "G2",
+  ifelse(group.ID=="group5", "G2","NA")
+)))))
+```
+
+```{r, include=FALSE}
+physio <- left_join(physio, cam_groups, by="sample.ID")
+meta_all <- physio[,c(2,8,9,10,13,14,23,32:35,37:39)]
+
+meta_all_unique <- meta_all %>% distinct()
+meta_all_unique <- subset(meta_all_unique, meta_all_unique$Sex!="")
+```
+
+# Subset by tissue 
+```{r}
+counts <- read.csv("OCNJ_F18_counts_2lanes.csv")
+rownames(counts) <- counts$Geneid
+counts <- counts[ ,7:ncol(counts)]
+counts <- counts[,colSums(counts) > 1000000]
+
+# started with 34686 -> non zero = 24636
+brain_counts <- counts[ , grepl( "brain" , names( raw_counts ) ) ]
+heart_counts <- counts[ , grepl( "heart" , names( raw_counts ) ) ]
+
+# keep only genes with at least 10 counts in at least 90% of individuals 
+0.9*(ncol(heart_counts)) #72
+0.9*(ncol(brain_counts)) #52
+
+heart_counts <- heart_counts[,colSums(heart_counts) > 1500000]
+```
+
+```{r}
+fc_head <- as.list(colnames(raw_counts))
+
+meta_all %>% filter(sample.ID %in% fc_head) -> fc_meta
+fc_meta <- subset(fc_meta, fc_meta$top_substrate !="NA")
+
+## Check our fc_meta lengths
+nrow(fc_meta) # 150
+
+brain_meta <- subset(fc_meta, fc_meta$tissue =="brain") # 66
+heart_meta <- subset(fc_meta, fc_meta$tissue =="heart") # 84
+
+nrow(brain_meta) #66
+nrow(heart_meta) #84
+
+# reorder
+col_order<- colnames(raw_counts)
+rownames(fc_meta) <- fc_meta$sample.ID
+fc_meta <- fc_meta[col_order, ]
+fc_meta <- subset(fc_meta, fc_meta$sample.ID!="NA")
+
+col_order_hearts <- colnames(heart_counts2)
+rownames(heart_meta2) <- heart_meta2$sample.ID
+heart_meta2 <- heart_meta2[col_order_hearts, ]
+heart_meta2<- subset(heart_meta2, heart_meta2$sample.ID!="NA")
+
+col_order_brain <- colnames(brain_counts2)
+rownames(brain_meta2) <- brain_meta2$sample.ID
+brain_meta2 <- brain_meta2[col_order_brain, ]
+
+all(rownames(heart_meta2)==colnames(heart_counts2))
+rownames(heart_meta2)==colnames(heart_counts2)
+
+all(rownames(brain_meta2)==colnames(brain_counts2))
+rownames(brain_meta2)==colnames(brain_counts2)
+```
+
+```{r}
+#library(DESeq2)
+#library(edgeR)
+heart_meta2$Cam.Temp <- as.factor(heart_meta2$Cam.Temp)
+brain_meta2$Cam.Temp <- as.factor(brain_meta2$Cam.Temp)
+# VST normalizaton
+heart_counts_dds_wgcna <- DESeqDataSetFromMatrix(countData = heart_counts2,  colData =heart_meta2 , design = ~ 1)
+heart_counts_dds_wgcna <- estimateSizeFactors(heart_counts_dds_2)
+heart_keep<- rowSums(counts(heart_counts_dds_wgcna)>=30) >= (0.1*ncol(heart_counts))
+heart_counts_dds_wgcna <- heart_counts_dds_wgcna[heart_keep,]
+nrow(heart_counts_dds_wgcna)
+
+heart_counts_norm <- counts(heart_counts_dds_wgcna, normalized=TRUE)
+
+brain_counts_dds_wgcna <- DESeqDataSetFromMatrix(countData = brain_counts2,  colData =brain_meta2 , design = ~ 1)
+brain_counts_dds_wgcna <- estimateSizeFactors(brain_counts_dds_2)
+brain_keep<- rowSums(counts(brain_counts_dds_wgcna)>=30) >= (0.1*ncol(brain_counts))
+brain_counts_dds_wgcna <- brain_counts_dds_wgcna[brain_keep,]
+nrow(brain_counts_dds_wgcna)
+
+brain_counts_norm <- counts(brain_counts_dds_wgcna, normalized=TRUE)
+
+```
+
+```{r transpose data}
+heart_counts_t <- as.data.frame(t(heart_counts_norm))
+brain_counts_t <- as.data.frame(t(brain_counts_norm))
+```
+
+```{r make all variables binary}
+heart_meta_WGCNA <- dummy_cols(heart_meta2, select_columns=c("Sex","Habitat.temp", "Cam.Temp", "top_substrate", "Population","new_group"))
+
+heart_meta_WGCNA <- heart_meta_WGCNA[,c(1,7:11,15,17,19,21:29)]
+```
+
+```{r filtering before WGCNA}
+# If allOK = TRUE all samples are good to go
+gsg = goodSamplesGenes(heart_counts_t, verbose = 3);
+gsg$allOK
+
+# remove genes with counts that are too low (hearts = 11599)
+if (!gsg$allOK)
+{
+# Optionally, print the gene and sample names that were removed:
+#if (sum(!gsg$goodGenes)>0)
+#printFlush(paste("Removing genes:", paste(names(heart_counts_t)[!gsg$goodGenes], collapse = ", ")));
+#if (sum(!gsg$goodSamples)>0)
+#printFlush(paste("Removing samples:", paste(rownames(heart_counts_t)[!gsg$goodSamples], collapse = ", ")));
+# Remove the offending genes and samples from the data: 
+heart_counts_t <- heart_counts_t[gsg$goodSamples, gsg$goodGenes]
+}
+
+gsg = goodSamplesGenes(brain_counts_t, verbose = 3);
+gsg$allOK
+
+# remove genes with counts that are too low (brains = 12048)
+if (!gsg$allOK)
+{
+# Optionally, print the gene and sample names that were removed:
+#if (sum(!gsg$goodGenes)>0)
+#printFlush(paste("Removing genes:", paste(names(brain_counts_t)[!gsg$goodGenes], collapse = ", ")));
+#if (sum(!gsg$goodSamples)>0)
+#printFlush(paste("Removing samples:", paste(rownames(brain_counts_t)[!gsg$goodSamples], collapse = ", ")));
+# Remove the offending genes and samples from the data:
+brain_counts_t <- brain_counts_t[gsg$goodSamples, gsg$goodGenes]
+}
+```
+
+```{r cluster samples to remove outliers}
+# hearts
+sampleTree = hclust(dist(heart_counts_t), method = "average");
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(12,9)
+#pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+cex.axis = 1.5, cex.main = 2)
+
+# remove outlier cluster
+# Plot a line to show the cut
+abline(h = 100, col = "red");
+# Determine cluster under the line
+clust = cutreeStatic(sampleTree, cutHeight = 100, minSize = 10)
+table(clust)
+# clust 1 contains the samples we want to keep.
+#keepSamples = (clust==c(1,2))
+#heart_counts_t = heart_counts_t[keepSamples, ]
+nGenes = ncol(heart_counts_t)
+nSamples = nrow(heart_counts_t)
+```
+```{r}
+# Form a data frame analogous to expression data that will hold the  traits.
+heartSamples = rownames(heart_counts_t)
+traitRows = match(heartSamples, heart_meta_WGCNA$sample.ID)
+datTraits_heart = heart_meta_WGCNA[traitRows, -1]
+rownames(datTraits_heart) = heart_meta_WGCNA[traitRows, 1]
+
+table(rownames(datTraits_heart)==rownames(heart_counts_t))
+```
+# Hearts - Module - trait associations
+```{r}
+# add WAM and CTMax data to trait matrix
+physio2 <- subset(physio, physio$sample.ID %in% rownames(datTraits_heart))
+physio2 <- subset(physio2, physio2$CaM.mass!=" ")
+
+rownames(physio2) <- physio2$sample.ID
+
+rownames(physio2) %in% rownames(datTraits_heart)
+
+datTraits_heart2 <- merge(datTraits_heart, physio2, by=0)
+
+datTraits_heart2 <- datTraits_heart2[,c(1:18,37,49:54)]
+
+rownames(datTraits_heart2) <- datTraits_heart2$Row.names
+datTraits_heart2 <- datTraits_heart2[,c(2:ncol(datTraits_heart2))]
+```
+
+```{r}
+# Make numeric variables
+datTraits_heart2$CaM.heart.mass <- as.numeric(datTraits_heart2$CaM.heart.mass)
+datTraits_heart2$FA.CamMass.Residuals <- as.numeric(datTraits_heart2$FA.CamMass.Residuals)
+datTraits_heart2$GLU.CamMass.Residuals <- as.numeric(datTraits_heart2$GLU.CamMass.Residuals)
+datTraits_heart2$LKA..CamMass.Residuals <- as.numeric(datTraits_heart2$LKA..CamMass.Residuals)
+datTraits_heart2$END.CamMass.Residuals <- as.numeric(datTraits_heart2$END.CamMass.Residuals)
+
+datTraits_heart2$Log.Log.WAM.Mass.residuals <- as.numeric(datTraits_heart2$Log.Log.WAM.Mass.residuals)
+datTraits_heart2$CaM.mass <- as.numeric(datTraits_heart2$CaM.mass)
+datTraits_heart2$CTMax.WAM.Mass.Residuals <- as.numeric(datTraits_heart2$CTMax.WAM.Mass.Residuals)
+
+datTraits_heart2$Sex.x <- as.numeric(datTraits_heart2$Sex.x)
+datTraits_heart2$Date.CaM.x <- as.numeric(datTraits_heart2$Date.CaM.x)
+
+datTraits_heart2$Habitat.temp.x <- as.numeric(datTraits_heart2$Habitat.temp.x)
+datTraits_heart2$Cam.Temp.x <- as.numeric(datTraits_heart2$Cam.Temp.x)
+datTraits_heart2$CaM.heart.mass.x <- as.numeric(datTraits_heart2$CaM.heart.mass.x)
+
+datTraits_heart2 <- datTraits_heart2[,c(1,2,5:25)]
+```
+
+```{r recluster heart}
+# Re-cluster samples
+sampleTree2 = hclust(dist(heart_counts_t), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits_heart2, signed = TRUE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+groupLabels = names(datTraits_heart2),
+main = "Heart Sample dendrogram and trait heatmap")
+```
+
+# Heart Analysis
+```{r soft-thresholding power}
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(heart_counts_t, powerVector = powers, verbose = 5)
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+# Hearts - Gene cluster generation
+```{r }
+# choose threshold power that is lowest above 0.9
+softPower = 5
+adjacency = adjacency(heart_counts_t, power = softPower)
+
+# Turn adjacency into topological overlap, to minimize effect of noise and spurrious associations
+TOM = TOMsimilarity(adjacency)
+dissTOM = 1-TOM
+```
+
+```{r}
+# Call the hierarchical clustering function
+geneTree = hclust(as.dist(dissTOM), method = "average");
+# Plot the resulting clustering tree (dendrogram)
+sizeGrWindow(12,9)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+labels = FALSE, hang = 0.04)
+```
+```{r trimming the tree}
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 30
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM,
+deepSplit = 2, pamRespectsDendro = FALSE,
+minClusterSize = minModuleSize)
+table(dynamicMods)
+```
+```{r view cut tree with modules colored}
+# Convert numeric lables into colors
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+# Plot the dendrogram and colors underneath
+plotDendroAndColors(geneTree, dynamicColors, "Dynamic Tree Cut",
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05,
+main = "Gene dendrogram and module colors")
+
+```
+
+```{r merge similar mods}
+# Calculate eigengenes
+MEList <- moduleEigengenes(heart_counts_t, colors = dynamicColors)
+MEs <- MEList$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss <- 1-cor(MEs);
+# Cluster module eigengenes
+METree <- hclust(as.dist(MEDiss), method = "average");
+# Plot the result
+sizeGrWindow(7, 6)
+plot(METree, main = "Clustering of module eigengenes",
+xlab = "", sub = "")
+
+# correlation of at least 75% to merge
+MEDissThres <- 0.25
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres, col = "red")
+# Call an automatic merging function
+merge <- mergeCloseModules(heart_counts_t, dynamicColors, cutHeight = MEDissThres, verbose = 3)
+# The merged module colors
+mergedColors <- merge$colors
+# Eigengenes of the new merged modules:
+mergedMEs <- merge$newMEs
+```
+
+```{r}
+# look at new aligned colors -- none of the modules merged..
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+c("Dynamic Tree Cut", "Merged dynamic"),
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05)
+```
+```{r}
+# Rename to moduleColors
+moduleColors = mergedColors
+# Construct numerical labels corresponding to the colors
+colorOrder = c("grey", standardColors(50));
+moduleLabels = match(moduleColors, colorOrder)-1;
+MEs = mergedMEs
+```
+
+```{r}
+#library(gplots)
+myheatcol = colorpanel(250,'red',"orange",'lemonchiffon')
+
+power=6
+color1=moduleColors
+diss1=1-TOMsimilarityFromExpr(heart_counts_t, power = 5) 
+hier1=hclust(as.dist(diss1), method="average")
+diag(diss1) = NA;
+sizeGrWindow(7,7)
+TOMplot(diss1^4, hier1, as.character(color1),
+       main = "TOM heatmap plot, module genes", col=myheatcol)
+```
+
+
+```{r}
+# split CaM by temp
+# Add Glu
+datTraits_heart2 <- mutate(datTraits_heart2, Glu_12=ifelse(Cam.Temp_12=="1", GLU.CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, Glu_28=ifelse(Cam.Temp_12=="0", GLU.CamMass.Residuals, "NA"))
+
+# Add FA
+datTraits_heart2 <- mutate(datTraits_heart2, FA_12=ifelse(Cam.Temp_12=="1", FA.CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, FA_28=ifelse(Cam.Temp_12=="0", FA.CamMass.Residuals, "NA"))
+
+# Add END
+datTraits_heart2 <- mutate(datTraits_heart2, END_12=ifelse(Cam.Temp_12=="1", END.CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, END_28=ifelse(Cam.Temp_12=="0", END.CamMass.Residuals, "NA"))
+
+# Add LKA
+datTraits_heart2 <- mutate(datTraits_heart2, LKA_12=ifelse(Cam.Temp_12=="1", LKA..CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, LKA_28=ifelse(Cam.Temp_12=="0", LKA..CamMass.Residuals, "NA"))
+
+# split CTMax and WAM by CaM temp
+# Add 12°C CTMax and WAM
+datTraits_heart2 <- mutate(datTraits_heart2, WAM_12=ifelse(Cam.Temp_12=="1", Log.Log.WAM.Mass.residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, CTMax_12=ifelse(Cam.Temp_12=="1", CTMax.WAM.Mass.Residuals, "NA"))
+
+# Add 28°C CTMax and WAM
+# Add 12°C CaM
+datTraits_heart2 <- mutate(datTraits_heart2, WAM_28=ifelse(Cam.Temp_12=="0", Log.Log.WAM.Mass.residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, CTMax_28=ifelse(Cam.Temp_12=="0", CTMax.WAM.Mass.Residuals, "NA"))
+
+# add body mass by accl temp
+datTraits_heart2 <- mutate(datTraits_heart2, body_mass_12=ifelse(Cam.Temp_12=="1", CaM.mass, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, body_mass_28=ifelse(Cam.Temp_12=="0", CaM.mass, "NA"))
+```
+
+```{r}
+# split CaM by group instead of by temp
+datTraits_heart2 <- mutate(datTraits_heart2, G1_LKA=ifelse(new_group_G1=="1", LKA..CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, G1_FA=ifelse(new_group_G1=="1", FA.CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, G1_GLU=ifelse(new_group_G1=="1", GLU.CamMass.Residuals, "NA"))
+
+datTraits_heart2<- mutate(datTraits_heart2, G1_END=ifelse(new_group_G1=="1", END.CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, G2_LKA=ifelse(new_group_G1=="0", LKA..CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, G2_FA=ifelse(new_group_G1=="0", FA.CamMass.Residuals, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, G2_GLU=ifelse(new_group_G1=="0", GLU.CamMass.Residuals, "NA"))
+
+datTraits_heart2<- mutate(datTraits_heart2, G2_END=ifelse(new_group_G1=="0", END.CamMass.Residuals, "NA"))
+
+# split HM by temp
+datTraits_heart2 <- mutate(datTraits_heart2, HM_12=ifelse(Cam.Temp_12=="1", CaM.heart.mass, "NA"))
+
+datTraits_heart2 <- mutate(datTraits_heart2, HM_28=ifelse(Cam.Temp_12=="0", CaM.heart.mass, "NA"))
+```
+
+```{r}
+datTraits_heart2$Log.Log.WAM.Mass.residuals <- as.numeric(datTraits_heart2$Log.Log.WAM.Mass.residuals)
+
+datTraits_heart2$CTMax.WAM.Mass.Residuals <- as.numeric(datTraits_heart2$CTMax.WAM.Mass.Residuals)
+
+datTraits_heart2$Glu_12 <- as.numeric(datTraits_heart2$Glu_12)
+datTraits_heart2$Glu_28 <- as.numeric(datTraits_heart2$Glu_28)
+
+datTraits_heart2$FA_12 <- as.numeric(datTraits_heart2$FA_12)
+datTraits_heart2$FA_28 <- as.numeric(datTraits_heart2$FA_28)
+
+datTraits_heart2$END_12 <- as.numeric(datTraits_heart2$END_12)
+datTraits_heart2$END_28 <- as.numeric(datTraits_heart2$END_28)
+
+datTraits_heart2$LKA_12 <- as.numeric(datTraits_heart2$LKA_12)
+datTraits_heart2$LKA_28 <- as.numeric(datTraits_heart2$LKA_28)
+
+datTraits_heart2$WAM_12 <- as.numeric(datTraits_heart2$WAM_12)
+datTraits_heart2$WAM_28 <- as.numeric(datTraits_heart2$WAM_28)
+
+datTraits_heart2$CTMax_12 <- as.numeric(datTraits_heart2$CTMax_12)
+datTraits_heart2$CTMax_28 <- as.numeric(datTraits_heart2$CTMax_28)
+
+datTraits_heart2$G1_FA <- as.numeric(datTraits_heart2$G1_FA)
+datTraits_heart2$G2_FA <- as.numeric(datTraits_heart2$G2_FA)
+
+datTraits_heart2$G1_LKA <- as.numeric(datTraits_heart2$G1_LKA)
+datTraits_heart2$G2_LKA <- as.numeric(datTraits_heart2$G2_LKA)
+
+datTraits_heart2$G1_GLU <- as.numeric(datTraits_heart2$G1_GLU)
+datTraits_heart2$G2_GLU <- as.numeric(datTraits_heart2$G2_GLU)
+
+datTraits_heart2$G1_END <- as.numeric(datTraits_heart2$G1_END)
+datTraits_heart2$G2_END <- as.numeric(datTraits_heart2$G2_END)
+
+datTraits_heart2$HM_12 <- as.numeric(datTraits_heart2$HM_12)
+datTraits_heart2$HM_28 <- as.numeric(datTraits_heart2$HM_28)
+
+datTraits_heart2$CaM.mass <- as.numeric(datTraits_heart2$CaM.mass)
+datTraits_heart2$body_mass_12 <- as.numeric(datTraits_heart2$body_mass_12)
+datTraits_heart2$body_mass_28 <- as.numeric(datTraits_heart2$body_mass_28)
+```
+
+```{r}
+
+# Define numbers of genes and samples
+nGenes = ncol(heart_counts_t)
+nSamples = nrow(heart_counts_t)
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(heart_counts_t, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+
+MEs <- MEs[match(rownames(datTraits_heart2), rownames(MEs)), ]
+
+moduleTraitCor = cor(MEs, datTraits_heart2, use = "p")
+moduleTraitPvalue = corPvalueFisher(moduleTraitCor, nSamples)
+```
+
+```{r view gene trait correl}
+# Will display correlations and their p-values
+textMatrix = paste(signif(moduleTraitCor, 2), "(",
+signif(p.adjust(moduleTraitPvalue, method="BH"), 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+xLabels = names(datTraits_heart2),
+yLabels = names(MEs),
+ySymbols = names(MEs),
+colorLabels = FALSE,
+colors = blueWhiteRed(50),
+textMatrix = textMatrix,
+setStdMargins = FALSE,
+cex.text = 0.5,
+zlim = c(-1,1),
+main = paste("Module-trait relationships heart -BH p-vals"))
+
+```
+
+Look at lists of singif modules for each trait
+```{r}
+mod_pval_df <- as.data.frame(moduleTraitPvalue)
+mod_r2_df <- as.data.frame(moduleTraitCor)
+
+# multiple test correct
+mod_pval_df$CaM.heart.mass <- p.adjust(mod_pval_df$CaM.heart.mass, method="BH")
+
+mod_pval_df$FA.CamMass.Residuals <- p.adjust(mod_pval_df$FA.CamMass.Residuals, method="BH")
+
+mod_pval_df$GLU.CamMass.Residuals <- p.adjust(mod_pval_df$GLU.CamMass.Residuals, method="BH")
+
+mod_pval_df$LKA..CamMass.Residuals <- p.adjust(mod_pval_df$LKA..CamMass.Residuals, method="BH")
+
+mod_pval_df$END.CamMass.Residuals <- p.adjust(mod_pval_df$END.CamMass.Residuals, method="BH")
+
+mod_pval_df$Log.Log.WAM.Mass.residuals<- p.adjust(mod_pval_df$Log.Log.WAM.Mass.residuals, method="BH")
+
+mod_pval_df$CTMax.WAM.Mass.Residuals <- p.adjust(mod_pval_df$CTMax.WAM.Mass.Residuals, method="BH")
+
+mod_pval_df$Glu_12 <- p.adjust(mod_pval_df$Glu_12, method="BH")
+mod_pval_df$Glu_28 <- p.adjust(mod_pval_df$Glu_28, method="BH")
+
+mod_pval_df$FA_12 <- p.adjust(mod_pval_df$FA_12, method="BH")
+mod_pval_df$FA_28 <- p.adjust(mod_pval_df$FA_28, method="BH")
+
+mod_pval_df$END_12 <- p.adjust(mod_pval_df$END_12, method="BH")
+mod_pval_df$END_28 <- p.adjust(mod_pval_df$END_28, method="BH")
+
+mod_pval_df$LKA_12 <- p.adjust(mod_pval_df$LKA_12, method="BH")
+mod_pval_df$LKA_28<- p.adjust(mod_pval_df$LKA_28, method="BH")
+
+mod_pval_df$WAM_12 <- p.adjust(mod_pval_df$WAM_12, method="BH")
+mod_pval_df$WAM_28 <- p.adjust(mod_pval_df$WAM_28, method="BH")
+
+mod_pval_df$CTMax_12 <- p.adjust(mod_pval_df$CTMax_12, method="BH")
+mod_pval_df$CTMax_28 <- p.adjust(mod_pval_df$CTMax_28, method="BH")
+
+mod_pval_df$HM_12 <- p.adjust(mod_pval_df$HM_12, method="BH")
+mod_pval_df$HM_28 <- p.adjust(mod_pval_df$HM_28, method="BH")
+
+mod_pval_df$body_mass_12 <- p.adjust(mod_pval_df$body_mass_12, method="BH")
+mod_pval_df$body_mass_28 <- p.adjust(mod_pval_df$body_mass_28, method="BH")
+mod_pval_df$CaM.mass <- p.adjust(mod_pval_df$CaM.mass, method="BH")
+
+mod_pval_df$G1_END <- p.adjust(mod_pval_df$G1_END, method="BH")
+mod_pval_df$G1_FA <- p.adjust(mod_pval_df$G1_FA, method="BH")
+mod_pval_df$G1_LKA <- p.adjust(mod_pval_df$G1_LKA, method="BH")
+mod_pval_df$G1_GLU <- p.adjust(mod_pval_df$G1_GLU, method="BH")
+
+mod_pval_df$G2_END <- p.adjust(mod_pval_df$G2_END, method="BH")
+mod_pval_df$G2_FA <- p.adjust(mod_pval_df$G2_FA, method="BH")
+mod_pval_df$G2_LKA <- p.adjust(mod_pval_df$G2_LKA, method="BH")
+mod_pval_df$G2_GLU <- p.adjust(mod_pval_df$G2_GLU, method="BH")
+
+
+# heart mass
+signif_HM_heart <- subset(rownames(mod_pval_df), mod_pval_df$CaM.heart.mass.x<0.05)
+signif_HM_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$HM_12<0.05)
+signif_HM_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$HM_28<0.05)
+
+# Fatty acids
+signif_FA_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$FA_12<0.05)
+signif_FA_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$FA_28<0.05)
+
+signif_FA_heart <- subset(rownames(mod_pval_df), mod_pval_df$FA.CamMass.Residuals.x<0.05)
+
+# Glucose
+signif_Glu_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$GLU_12<0.05)
+signif_Glu_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$GLU_28 <0.05)
+signif_Glu_heart <- subset(rownames(mod_pval_df), mod_pval_df$GLU.CamMass.Residuals.x <0.05)
+
+# LKA
+signif_LKA_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$LKA_12<0.05)
+signif_LKA_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$LKA_28 <0.05)
+signif_LKA_heart <- subset(rownames(mod_pval_df), mod_pval_df$LKA..CamMass.Residuals.x <0.05)
+
+# END
+signif_END_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$END_12<0.05)
+signif_END_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$END_28 <0.05)
+signif_END_heart <- subset(rownames(mod_pval_df), mod_pval_df$END.CamMass.Residuals.x <0.05)
+
+# CTMax
+signif_ctmax_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$CTMax_12 <0.05)
+signif_ctmax_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$CTMax_28  <0.05)
+signif_ctmax_heart <- subset(rownames(mod_pval_df), mod_pval_df$CTMax.WAM.Mass.Residuals  <0.05)
+
+# WAM
+signif_wam_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$WAM_12 <0.05)
+signif_wam_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$WAM_28<0.05)
+signif_wam_heart <- subset(rownames(mod_pval_df), mod_pval_df$Log.Log.WAM.Mass.residuals<0.05)
+
+# body mass
+signif_BM_12_heart <- subset(rownames(mod_pval_df), mod_pval_df$body_mass_12 <0.05)
+signif_BM_28_heart <- subset(rownames(mod_pval_df), mod_pval_df$body_mass_28<0.05)
+signif_BM_heart <- subset(rownames(mod_pval_df), mod_pval_df$CaM.mass<0.05)
+
+# group 1
+signif_G1_END_heart <- subset(rownames(mod_pval_df), mod_pval_df$G1_END<0.05)
+signif_G1_FA_heart <- subset(rownames(mod_pval_df), mod_pval_df$G1_FA<0.05)
+signif_G1_LKA_heart <- subset(rownames(mod_pval_df), mod_pval_df$G1_LKA<0.05)
+signif_G1_GLU_heart <- subset(rownames(mod_pval_df), mod_pval_df$G1_GLU<0.05)
+
+
+# group 2
+signif_G2_END_heart <- subset(rownames(mod_pval_df), mod_pval_df$G2_END<0.05)
+signif_G2_FA_heart <- subset(rownames(mod_pval_df), mod_pval_df$G2_FA<0.05)
+signif_G2_LKA_heart <- subset(rownames(mod_pval_df), mod_pval_df$G2_LKA<0.05)
+signif_G2_GLU_heart <- subset(rownames(mod_pval_df), mod_pval_df$G2_GLU<0.05)
+
+
+#write.csv(mod_pval_df, "heart_WGCNA_pval_matrix.csv")
+#write.csv(mod_r2_df, "heart_WGCNA_R_matrix.csv")
+```
+
+```{r}
+# combine significant lists 
+
+signif_lists <- as.list(c("signif_Glu_heart","signif_Glu_12_heart","signif_Glu_28_heart","signif_FA_heart","signif_FA_12_heart","signif_FA_28_heart","signif_LKA_heart","signif_LKA_12_heart","signif_LKA_28_heart","signif_END_heart","signif_END_12_heart","signif_END_28_heart", "signif_ctmax_heart","signif_ctmax_12_heart","signif_ctmax_28_heart","signif_wam_heart","signif_wam_12_heart","signif_wam_28_heart","signif_BM_heart","signif_BM_12_heart","signif_BM_28_heart","signif_HM_heart","signif_HM_12_heart","signif_HM__28_heart","signif_G1_END_heart","signif_G2_END_heart","signif_G1_FA_heart","signif_G2_FA_heart","signif_G1_LKA_heart","signif_G2_LKA_heart","signif_G1_GLU_heart", "signif_G2_GLU_heart"))
+
+signif_lists <- gsub("'"," ",print(signif_lists))
+
+l1 <- list(signif_Glu_heart,signif_Glu_12_heart,signif_Glu_28_heart,signif_FA_heart,signif_FA_12_heart,signif_FA_28_heart,signif_LKA_heart,signif_LKA_12_heart,signif_LKA_28_heart,signif_END_heart,signif_END_12_heart,signif_END_28_heart, signif_ctmax_heart,signif_ctmax_12_heart,signif_ctmax_28_heart,signif_wam_heart,signif_wam_12_heart,signif_wam_28_heart,signif_BM_heart,signif_BM_12_heart,signif_BM_28_heart,signif_HM_heart,signif_HM_28_heart,signif_HM_12_heart,signif_G1_END_heart,signif_G2_END_heart,signif_G1_FA_heart,signif_G2_FA_heart,signif_G1_LKA_heart,signif_G2_LKA_heart,signif_G1_GLU_heart, signif_G2_GLU_heart)
+
+m1 <- matrix(unlist(l1), nrow = sum(lengths(l1)), ncol = length(l1))
+m1[!mapply(`%in%`, as.data.frame(m1), l1)] <- 0
+
+m1 <- as.data.frame(m1)
+colnames(m1) <- c("signif_Glu_heart","signif_Glu_12_heart","signif_Glu_28_heart","signif_FA_heart","signif_FA_12_heart","signif_FA_28_heart","signif_LKA_heart","signif_LKA_12_heart","signif_LKA_28_heart","signif_END_heart","signif_END_12_heart","signif_END_28_heart", "signif_ctmax_heart","signif_ctmax_12_heart","signif_ctmax_28_heart","signif_wam_heart","signif_wam_12_heart","signif_wam_28_heart","signif_BM_heart","signif_BM_12_heart","signif_BM_28_heart","signif_HM_heart","signif_HM_12_heart","signif_HM__28_heart","signif_G1_END_heart","signif_G2_END_heart","signif_G1_FA_heart","signif_G2_FA_heart","signif_G1_LKA_heart","signif_G2_LKA_heart","signif_G1_GLU_heart", "signif_G2_GLU_heart")
+
+signif_heart_WGCNA <- m1
+signif_heart_WGCNA
+
+#write.csv(signif_heart_WGCNA, "new_signif_heart_WGCNA.csv")
+```
+
+Find modules that are most highly correlated with a trait: define gene significance as the absolute value of correlation between a gene and the trait and define module membership as the correlation between the eigengene and each gene in the module. Expect genes with higher module membership to have greater gene significance
+
+SAVE LISTS OF MODULES
+only for traits with at least 1 signif module
+```{r heart save per gene MM and p-value lists}
+# Define variable -- LKA Metabolism 12
+LKA_12 = as.data.frame(datTraits_heart2$LKA_12);
+names(LKA_12) = "LKA_12"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, LKA_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(LKA_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(LKA_12), sep="")
+
+# Save data for CaM LKA 12
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, LKA_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.LKA_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_blue_data <- subset(geneInfo, geneInfo$moduleColor=="blue")
+h_blue_data[order(-abs(h_blue_data$MM.blue)),]
+nrow(subset(h_blue_data, h_blue_data$MM.blue>0))
+nrow(subset(h_blue_data, h_blue_data$MM.blue<0))
+h_blue_data[order(-abs(h_blue_data$GS.LKA_12)),]
+nrow(subset(h_blue_data, h_blue_data$GS.LKA_12>0))
+
+h_red_data <- subset(geneInfo, geneInfo$moduleColor=="red")
+h_red_data[order(-abs(h_red_data$MM.red)),]
+nrow(subset(h_red_data, h_red_data$MM.red>0))
+nrow(subset(h_red_data, h_red_data$MM.red<0))
+h_red_data[order(-abs(h_red_data$GS.LKA_12)),]
+nrow(subset(h_red_data, h_red_data$GS.LKA_12>0))
+
+#write.csv(geneInfo, file = "heart_LKA12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- END Metabolism 12
+END_12 = as.data.frame(datTraits_heart2$END_12);
+names(END_12) = "END_12"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, END_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(END_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(END_12), sep="")
+
+# Save data for CaM END 12
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, END_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.END_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_darkolivegreen_data <- subset(geneInfo, geneInfo$moduleColor=="darkolivegreen")
+h_darkolivegreen_data[order(-abs(h_darkolivegreen_data$MM.darkolivegreen)),]
+nrow(subset(h_darkolivegreen_data, h_darkolivegreen_data$MM.darkolivegreen>0))
+nrow(subset(h_darkolivegreen_data, h_darkolivegreen_data$MM.darkolivegreen<0))
+h_darkolivegreen_data[order(-abs(h_darkolivegreen_data$GS.END_12)),]
+nrow(subset(h_darkolivegreen_data, h_darkolivegreen_data$GS.END_12>0))
+
+#write.csv(geneInfo, file = "heart_END12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- WAM 12
+WAM_12 = as.data.frame(datTraits_heart2$WAM_12);
+names(WAM_12) = "WAM_12"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, WAM_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(WAM_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(WAM_12), sep="")
+
+# Save data for WAM 12
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, WAM_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.WAM_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_darkmagenta_data <- subset(geneInfo, geneInfo$moduleColor=="darkmagenta")
+h_darkmagenta_data[order(-abs(h_darkmagenta_data$MM.darkmagenta)),]
+nrow(subset(h_darkmagenta_data, h_darkmagenta_data$MM.darkmagenta>0))
+nrow(subset(h_darkmagenta_data, h_darkmagenta_data$MM.darkmagenta<0))
+h_darkmagenta_data[order(-abs(h_darkmagenta_data$GS.WAM_12)),]
+nrow(subset(h_darkmagenta_data, h_darkmagenta_data$GS.WAM_12>0))
+
+h_orangered4_data <- subset(geneInfo, geneInfo$moduleColor=="orangered4")
+h_orangered4_data[order(-abs(h_orangered4_data$MM.orangered4)),]
+nrow(subset(h_orangered4_data, h_orangered4_data$MM.orangered4>0))
+nrow(subset(h_orangered4_data, h_orangered4_data$MM.orangered4<0))
+h_orangered4_data[order(-abs(h_orangered4_data$GS.WAM_12)),]
+nrow(subset(h_orangered4_data, h_orangered4_data$GS.WAM_12>0))
+
+h_saddlebrown_data <- subset(geneInfo, geneInfo$moduleColor=="saddlebrown")
+h_saddlebrown_data[order(-abs(h_saddlebrown_data$MM.saddlebrown)),]
+nrow(subset(h_saddlebrown_data, h_saddlebrown_data$MM.saddlebrown>0))
+nrow(subset(h_saddlebrown_data, h_saddlebrown_data$MM.saddlebrown<0))
+h_saddlebrown_data[order(-abs(h_saddlebrown_data$GS.WAM_12)),]
+nrow(subset(h_saddlebrown_data, h_saddlebrown_data$GS.WAM_12>0))
+
+h_salmon_data <- subset(geneInfo, geneInfo$moduleColor=="salmon")
+h_salmon_data[order(-abs(h_salmon_data$MM.salmon)),]
+nrow(subset(h_salmon_data, h_salmon_data$MM.salmon>0))
+nrow(subset(h_salmon_data, h_salmon_data$MM.salmon<0))
+h_salmon_data[order(-abs(h_salmon_data$GS.WAM_12)),]
+nrow(subset(h_salmon_data, h_salmon_data$GS.WAM_12>0))
+
+#write.csv(geneInfo, file = "heart_WAM12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- CTMax 28
+CTMax_28 = as.data.frame(datTraits_heart2$CTMax_28);
+names(CTMax_28) = "CTMax_28"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, CTMax_28, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(CTMax_28), sep="")
+names(GSPvalue) = paste("p.GS.", names(CTMax_28), sep="")
+
+# Save data for Ctmax 28
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, CTMax_28, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.CTMax_28));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_violet_data <- subset(geneInfo, geneInfo$moduleColor=="violet")
+h_violet_data[order(-abs(h_violet_data$MM.violet)),]
+nrow(subset(h_violet_data, h_violet_data$MM.violet>0))
+nrow(subset(h_violet_data, h_violet_data$MM.violet<0))
+h_violet_data[order(-abs(h_violet_data$GS.CTMax_28)),]
+nrow(subset(h_violet_data, h_violet_data$GS.CTMax_28>0))
+
+#write.csv(geneInfo, file = "heart_CTMax28_WGCNA_geneInfo_signed.csv")
+```
+
+```{r save per gene MM and p-value lists for each of 8 traits}
+# Define variable -- CTMax 12
+CTMax_12 = as.data.frame(datTraits_heart2$CTMax_12);
+names(CTMax_12) = "CTMax_12"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, CTMax_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(CTMax_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(CTMax_12), sep="")
+
+# Save data for CaM FA
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, CTMax_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.CTMax_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_tan_data <- subset(geneInfo, geneInfo$moduleColor=="tan")
+h_tan_data[order(-abs(h_tan_data$MM.tan)),]
+nrow(subset(h_tan_data, h_tan_data$MM.tan>0))
+nrow(subset(h_tan_data, h_tan_data$MM.tan<0))
+h_tan_data[order(-abs(h_tan_data$GS.CTMax_12)),]
+nrow(subset(h_tan_data, h_tan_data$GS.CTMax_12>0))
+
+#write.csv(geneInfo, file = "heart_CTMax12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r save per gene MM and p-value lists for each of 8 traits}
+# Define variable -- CaM HM
+CaM_HM_12 = as.data.frame(datTraits_heart2$HM_12);
+names(CaM_HM_12) = "CaM_HM_12"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, CaM_HM_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(CaM_HM_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(CaM_HM_12), sep="")
+
+# Save data for heart mass 12
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, CaM_HM_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.CaM_HM_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_blue_data <- subset(geneInfo, geneInfo$moduleColor=="blue")
+h_blue_data[order(-abs(h_blue_data$MM.blue)),]
+nrow(subset(h_blue_data, h_blue_data$MM.blue>0))
+nrow(subset(h_blue_data, h_blue_data$MM.blue<0))
+h_blue_data[order(-abs(h_blue_data$GS.CaM_HM_12)),]
+nrow(subset(h_blue_data, h_blue_data$GS.CaM_HM_12>0))
+
+#write.csv(geneInfo, file = "heart_HeartMass12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- BM-28
+FA_12 = as.data.frame(datTraits_heart2$FA_12);
+names(FA_12) = "FA_12"
+# names (colors) of the modules
+modNames = substring(names(MEs), 3)
+geneModuleMembership = as.data.frame(cor(heart_counts_t, MEs, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(heart_counts_t, FA_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(FA_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(FA_12), sep="")
+
+# Save data for FA 12
+gene_ids_wgcna = names(heart_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs, FA_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.FA_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+h_lightcyan_data <- subset(geneInfo, geneInfo$moduleColor=="lightcyan")
+h_lightcyan_data[order(-abs(h_lightcyan_data$MM.lightcyan)),]
+nrow(subset(h_lightcyan_data, h_lightcyan_data$MM.lightcyan>0))
+nrow(subset(h_lightcyan_data, h_lightcyan_data$MM.lightcyan<0))
+h_lightcyan_data[order(-abs(h_lightcyan_data$GS.FA_12)),]
+nrow(subset(h_lightcyan_data, h_lightcyan_data$GS.FA_12>0))
+
+h_saddlebrown_data <- subset(geneInfo, geneInfo$moduleColor=="saddlebrown")
+h_saddlebrown_data[order(-abs(h_saddlebrown_data$MM.saddlebrown)),]
+nrow(subset(h_saddlebrown_data, h_saddlebrown_data$MM.saddlebrown>0))
+nrow(subset(h_saddlebrown_data, h_saddlebrown_data$MM.saddlebrown<0))
+h_saddlebrown_data[order(-abs(h_saddlebrown_data$GS.FA_12)),]
+nrow(subset(h_saddlebrown_data, h_saddlebrown_data$GS.FA_12>0))
+
+h_salmon_data <- subset(geneInfo, geneInfo$moduleColor=="salmon")
+h_salmon_data[order(-abs(h_salmon_data$MM.salmon)),]
+nrow(subset(h_salmon_data, h_salmon_data$MM.salmon>0))
+nrow(subset(h_salmon_data, h_salmon_data$MM.salmon<0))
+h_salmon_data[order(-abs(h_salmon_data$GS.FA_12)),]
+nrow(subset(h_salmon_data, h_salmon_data$GS.FA_12>0))
+
+#write.csv(geneInfo, file ="heart_FA12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# grab lists of all mRNAs in a module
+tan_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="tan"))
+violet_mod_heart <- rownames(subset(geneInfo, geneInfo$moduleColor=="violet"))
+darkolivegreen_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="darkolivegreen"))
+lightcyan_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="lightcyan"))
+saddlebrown_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="saddlebrown"))
+salmon_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="salmon"))
+blue_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="blue"))
+red_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="red"))
+darkmagenta_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="darkmagenta"))
+orangered4_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="orangered4"))
+
+glycolysis_list <- c("LDHB","GAPD","ALDH9A1","PYGM","PFKM","PKM2","PGK1","FBP1","ALDOA","ENO1","TPI1","GPI","PGAM1","PGM1")
+
+tca_list <- c("IDH2","IDH3A","PDHA1","PDHB","OGDH","SDHC","DLD","DLST","PCK2","CS","FH","ACAS2","SUCLG1")
+
+oxphos_complex3 <- c("UQCRC2","UQCR10","UQCRC1","UQCRFS1")
+oxphos_complex1 <- c("NDUFA4","NDUFA1","NDUFA10","NDUFA9","NDUFB6","MTND2","NDUFAB1","NDUFS4","NUFS1","NUOG","NDUFV2","NDUFA4","MTND5","NDUFS3","NDUFA8","NDUFB2","NDUFB8","NDUFB9","NDUFB1","NDUFB10")
+
+oxphos_complex4 <- c("COXII","COX4I1","COX4I2","COX5A","COX6A1","COX6B","COX7A2","COX8H","COX7C","COX8L")
+
+oxphos_atpsyn <- c("ATP5B","MTATP6","ATP5H","ATP5A2","ATP5D","ATP5C1","ATP5F1","ATP6V0C","ATP6V0D1","ATP6V1C1")
+
+# uppercase everything
+tan_mod <- lapply(tan_mod, function(x) toupper(x))
+tan_mod <- as.character(tan_mod)
+
+violet_mod_heart  <- lapply(violet_mod_heart, function(x) toupper(x))
+violet_mod_heart  <- as.character(violet_mod_heart)
+
+darkolivegreen_mod <- lapply(darkolivegreen_mod, function(x) toupper(x))
+darkolivegreen_mod <- as.character(darkolivegreen_mod)
+
+lightcyan_mod  <- lapply(lightcyan_mod, function(x) toupper(x))
+lightcyan_mod <- as.character(lightcyan_mod)
+
+saddlebrown_mod  <- lapply(saddlebrown_mod, function(x) toupper(x))
+saddlebrown_mod <- as.character(saddlebrown_mod)
+
+salmon_mod  <- lapply(salmon_mod, function(x) toupper(x))
+salmon_mod <- as.character(salmon_mod)
+
+blue_mod  <- lapply(blue_mod, function(x) toupper(x))
+blue_mod <- as.character(blue_mod)
+
+red_mod  <- lapply(red_mod, function(x) toupper(x))
+red_mod <- as.character(red_mod)
+
+darkmagenta_mod  <- lapply(darkmagenta_mod, function(x) toupper(x))
+darkmagenta_mod <- as.character(darkmagenta_mod)
+
+orangered4_mod  <- lapply(orangered4_mod, function(x) toupper(x))
+orangered4_mod <- as.character(orangered4_mod)
+```
+
+```{r}
+# overlap with known metabolic pathways
+# tan = none, 
+nrow(subset(pink_mod, pink_mod %in% glycolysis_list))
+
+nrow(subset(pink_mod, pink_mod%in% tca_list))
+
+nrow(subset(pink_mod, pink_mod %in% oxphos_complex3))
+
+nrow(subset(pink_mod, pink_mod %in% oxphos_complex1))
+
+nrow(subset(pink_mod, pink_mod %in% oxphos_complex4))
+
+nrow(subset(violet_mod_heart, violet_mod_heart %in% purple_mod))
+
+```
+
+```{r}
+nrow(heart_temp_NOC_signif) #63
+
+nrow(subset(heart_temp_SOC_signif, rownames(heart_temp_SOC_signif) %in% rownames(heart_TEvNOC_12_signif))) #27
+
+nrow(subset(heart_temp_SOC_signif, rownames(heart_temp_SOC_signif) %in% rownames(heart_TEvSOC_12_signif))) #0
+
+nrow(subset(heart_temp_NOC_signif, rownames(heart_temp_NOC_signif) %in% rownames(heart_NOCvSOC_12_signif))) #34
+
+nrow(subset(heart_temp_NOC_signif, rownames(heart_temp_NOC_signif) %in% rownames(heart_TEvNOC_28_signif))) #34
+
+nrow(subset(heart_temp_NOC_signif, rownames(heart_temp_NOC_signif) %in% rownames(heart_TEvSOC_28_signif))) #2
+
+nrow(subset(heart_temp_NOC_signif, rownames(heart_temp_NOC_signif) %in% rownames(heart_NOCvSOC_28_signif))) #39
+
+# brain
+nrow(brain_temp_TE_signif) #99
+
+nrow(subset(brain_temp_TE_signif, rownames(brain_temp_TE_signif) %in% rownames(brain_TEvNOC_12_signif))) #5
+
+nrow(subset(brain_temp_TE_signif, rownames(brain_temp_TE_signif) %in% rownames(brain_TEvSOC_12_signif))) #13
+
+nrow(subset(brain_temp_TE_signif, rownames(brain_temp_TE_signif) %in% rownames(brain_NOCvSOC_12_signif))) #4
+
+nrow(subset(brain_temp_TE_signif, rownames(brain_temp_TE_signif) %in% rownames(brain_TEvNOC_28_signif))) #24
+
+nrow(subset(brain_temp_TE_signif, rownames(brain_temp_TE_signif) %in% rownames(brain_TEvSOC_28_signif))) #21
+
+nrow(subset(brain_temp_NOC_signif, rownames(brain_temp_NOC_signif) %in% rownames(brain_NOCvSOC_28_signif))) #3
+```
+
+```{r}
+# import eggnog mapper annotations
+emapper_annot <- read.csv("funhe_annotations_eggnog_mapper_2021.csv")
+
+# reference list for BiNGO Enrichment Analysis
+emapper_annot$GOs <- as.character(emapper_annot$GOs)
+
+emapper_annot %>% dplyr::select(Preferred_name, GOs) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(GOs, sep = ",") %>%
+  mutate(GOs = str_remove(GOs, "GO:")) %>% 
+  unite(x, c(Preferred_name, GOs), sep = " = ", remove = TRUE) -> mapped_go
+
+View(mapped_go)
+
+#write.table(mapped_go,
+ #           file = "~/Desktop/cyto_funhe_input.txt",
+  #          quote=FALSE, 
+   #         row.names=FALSE, 
+    #       col.names=FALSE)
+
+# reference list for KEGG Enrichment Analysis
+emapper_annot$KEGG_ko <- as.character(emapper_annot$KEGG_ko)
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") %>%
+  mutate(KEGG_ko = str_remove(KEGG_ko, "ko:")) %>% 
+  unite(x, c(Preferred_name, KEGG_ko), sep = " = ", remove = TRUE) -> mapped_KEGG
+
+View(mapped_KEGG)
+
+#write.table(mapped_KEGG,
+ #           file = "~/Desktop/funhe_KEGG.txt",
+  #          quote=FALSE, 
+   #         row.names=FALSE, 
+    #        col.names=FALSE)
+
+```
+
+```{r}
+# format lists of terms GO and KEGG for enrichment test
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") -> column_kegg
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_Pathway) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_Pathway, sep = ",") -> column_kegg_path
+
+column_kegg$term  <- column_kegg$KEGG_ko
+column_kegg$gene <- column_kegg$Preferred_name
+column_kegg <- column_kegg[,3:4]
+
+column_kegg_path$term  <- column_kegg_path$KEGG_Pathway
+column_kegg_path$gene <- column_kegg_path$Preferred_name
+column_kegg_path <- column_kegg_path[,3:4]
+
+# pull out background set to map
+all_mRNAs <- colnames(heart_counts_t)
+
+# annotate just these
+all_mRNAs_upper <- lapply(all_mRNAs, function(x) toupper(x))
+all_mRNAs_upper  <- as.character(all_mRNAs_upper )
+
+# library(clusterProfiler)
+orangered4_kegg <- enricher(orangered4_mod, universe=all_mRNAs_upper, TERM2GENE = column_kegg, minGSSize = 1, maxGSSize=1000, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+orangered4_keggpath <- enricher(orangered4_mod, universe=all_mRNAs_upper, TERM2GENE = column_kegg_path, minGSSize = 1, maxGSSize=1000, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+#write.csv(orangered4_mod, "heart_orangered4.txt")
+
+#write.csv(all_mRNAs_upper, "background_ref_funhe.csv")
+#write.csv(orangered4_kegg, "heart_black_kegg.csv")
+```
+
+```{r}
+# MEs = module eigenvectors, 1st PC of each module
+# correlate across individuals ranked by a given trait
+# E.g. lightgreen module is signif correlated with LKA 
+# rank individuals left to right, low to high LKA 
+
+# merge MEs with metadata by rownames
+heart_traits <- datTraits_heart2
+traits_MEs <- MEs
+
+traits_MEs <- merge(traits_MEs, heart_traits, by="row.names")
+traits_MEs_12 <- subset(traits_MEs, traits_MEs$Cam.Temp_12=="1")
+traits_MEs_28 <- subset(traits_MEs, traits_MEs$Cam.Temp_12=="0")
+traits_MEs_g1 <- subset(traits_MEs, traits_MEs$new_group_G1=="1")
+traits_MEs_g2 <- subset(traits_MEs, traits_MEs$new_group_G1=="0")
+
+
+traits_MEs_12_pop <- traits_MEs_12 %>% 
+  mutate(Population = ifelse(Population_NOC=="1", "NOC", 
+                                ifelse(Population_SOC=="1", "SOC",
+                                       "TE")))
+
+traits_MEs_28_pop <- traits_MEs_28 %>% 
+  mutate(Population = ifelse(Population_NOC=="1", "NOC", 
+                                ifelse(Population_SOC=="1", "SOC",
+                                       "TE")))
+
+ggplot(data=traits_MEs, aes(y=G1_END, x=MEblue)) +
+  geom_point(aes(shape=as.factor(Cam.Temp.x))) + 
+  theme_bw()  +stat_smooth(method="lm") + xlim(values=c(-0.1,0.1))
+
+# make a plot
+
+p1 <- ggplot(data=traits_MEs_12, aes(x=MElightcyan)) +
+    geom_point(aes(y=FA_12)) + 
+  stat_smooth(method="lm", aes(y=FA_12, color="lightcyan"), alpha=1) +
+  labs(title = "Lightcyan Module", y="FA 12°C", x="MElightcyan") + theme_bw() +
+  scale_color_manual(values="lightcyan")+ xlim(values=c(-0.09,0.021)) + ylim(values=c(-30,50))+ theme(legend.position =  "none")
+
+p2 <- ggplot(data=traits_MEs_12, aes(x=MEsaddlebrown)) +
+    geom_point(aes(y=FA_12)) + 
+  stat_smooth(method="lm", aes(y=FA_12, color="saddlebrown"), alpha=1) +
+  labs(title = "Saddlebrown Module", y="FA 12°C", x="MEsaddlebrown") + theme_bw() +
+  scale_color_manual(values="saddlebrown") + ylim(values=c(-30,50))+ theme(legend.position =  "none")
+
+p3 <- ggplot(data=traits_MEs_12, aes(x=MEsalmon)) +
+    geom_point(aes(y=FA_12)) + 
+  stat_smooth(method="lm", aes(y=FA_12, color="salmon"), alpha=1) +
+  labs(title = "Salmon Module", y="FA 12°C", x="MEsalmon") + theme_bw() +
+    scale_color_manual(values="salmon") + ylim(values=c(-30,50))+ theme(legend.position =  "none")
+
+
+p4 <- ggplot(data=traits_MEs_12, aes(x=MEblue)) +
+    geom_point(aes(y=LKA_12)) + 
+  stat_smooth(method="lm", aes(y=LKA_12, color="blue"), alpha=1) +
+  labs(title = "Blue Module", y="LKA 12°C", x="MEblue") + theme_bw() +
+  scale_color_manual(values="blue") + ylim(values=c(-30,45))+ theme(legend.position =  "none")
+
+p5 <- ggplot(data=traits_MEs_12, aes(x=MEred)) +
+    geom_point(aes(y=LKA_12)) + stat_smooth(method="lm", aes(y=LKA_12, color="red"), alpha=1) + labs(title = "Red Module", y="LKA 12°C", x="MEred") + theme_bw() + scale_color_manual(values="red") + ylim(values=c(-30,45)) + theme(legend.position =  "none")
+
+multiplot(p1, p2, p3, p4, p5, cols=2)
+
+```
+
+```{r}
+pl1 <- ggplot(data=traits_MEs_12, aes(x=MEtan)) +
+    geom_point(aes(y=CTMax_12)) + 
+  stat_smooth(method="lm", aes(y=CTMax_12, color="tan"), alpha=1) +
+  labs(title = "Tan Module", y="CTMax 12°C", x="MEtan") + theme_bw() +
+  scale_color_manual(values="tan") +xlim(values=c(-0.075,0.02))
+
+pl2 <- ggplot(data=traits_MEs_28, aes(x=MEviolet)) +
+    geom_point(aes(y=CTMax_28)) + 
+  stat_smooth(method="lm", aes(y=CTMax_28, color="violet"), alpha=1) +
+  labs(title = "Violet Module", y="FA 12°C", x="MEviolet") + theme_bw() +
+  scale_color_manual(values="violet") +xlim(values=c(-0.08,0.03))
+
+pl3 <- ggplot(data=traits_MEs_12, aes(x=MEdarkmagenta)) +
+    geom_point(aes(y=WAM_12)) + 
+  stat_smooth(method="lm", aes(y=WAM_12, color="darkmagenta"), alpha=1) +
+  labs(title = "Darkmagenta Module", y="WAM 12°C", x="MEdarkmagenta") + theme_bw() +
+    scale_color_manual(values="darkmagenta")
+
+
+pl4 <- ggplot(data=traits_MEs_12, aes(x=MEdarkmagenta)) +
+    geom_point(aes(y=WAM_12)) + 
+  stat_smooth(method="lm", aes(y=WAM_12, color="orangered4"), alpha=1) +
+  labs(title = "Orangered4 Module", y="WAM 12°C", x="MEorangered4") + theme_bw() +
+    scale_color_manual(values="orangered4")
+
+pl5 <- ggplot(data=traits_MEs_12, aes(x=MEsaddlebrown)) +
+    geom_point(aes(y=WAM_12)) + 
+  stat_smooth(method="lm", aes(y=WAM_12, color="saddlebrown"), alpha=1) +
+  labs(title = "Saddlebrown Module", y="WAM 12°C", x="MEsaddlebrown") + theme_bw() +
+    scale_color_manual(values="saddlebrown")
+
+pl6 <- ggplot(data=traits_MEs_12, aes(x=MEsalmon)) +
+    geom_point(aes(y=WAM_12)) + 
+  stat_smooth(method="lm", aes(y=WAM_12, color="salmon"), alpha=1) +
+  labs(title = "Salmon Module", y="WAM 12°C", x="MEsalmon") + theme_bw() +
+    scale_color_manual(values="salmon")
+
+multiplot(pl1, pl2, pl3, pl4, pl5, pl6, cols=2)
+
+```
+
+############### BRAIN ################
+```{r}
+brain_meta_WGCNA <- dummy_cols(brain_meta, select_columns=c("Sex","Habitat.temp", "Cam.Temp", "top_substrate", "Population"))
+
+brain_meta_WGCNA <- brain_meta_WGCNA[,c(1,7:11,15,17,19,21:27)]
+```
+
+```{r cluster samples to remove outliers}
+# brains
+sampleTree_B = hclust(dist(brain_counts_t), method = "average");
+# Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+sizeGrWindow(12,9)
+#pdf(file = "Plots/sampleClustering.pdf", width = 12, height = 9);
+par(cex = 0.6);
+par(mar = c(0,4,2,0))
+plot(sampleTree_B, main = "Sample clustering to detect outliers", sub="", xlab="", cex.lab = 1.5,
+cex.axis = 1.5, cex.main = 2)
+
+# remove outlier cluster
+# Plot a line to show the cut
+abline(h = 100, col = "red");
+# Determine cluster under the line
+clust = cutreeStatic(sampleTree, cutHeight = 100, minSize = 10)
+table(clust)
+# clust 1 contains the samples we want to keep.
+#keepSamples = (clust==1)
+#brain_counts_t = brain_counts_t[keepSamples, ]
+nGenes = ncol(brain_counts_t)
+nSamples = nrow(brain_counts_t)
+```
+
+```{r}
+# Form a data frame analogous to expression data that will hold the  traits.
+brainSamples = rownames(brain_counts_t)
+traitRows = match(brainSamples, brain_meta_WGCNA$sample.ID)
+datTraits_brain = brain_meta_WGCNA[traitRows, -1]
+rownames(datTraits_brain) = brain_meta_WGCNA[traitRows, 1]
+
+table(rownames(datTraits_brain)==rownames(brain_counts_t))
+```
+
+```{r}
+# add WAM and CTMax data to trait matrix
+physio2_brain <- subset(physio, physio$sample.ID %in% rownames(datTraits_brain))
+physio2_brain <- subset(physio2_brain, physio2_brain$CaM.mass!=" ")
+
+rownames(physio2_brain) <- physio2_brain$sample.ID
+
+rownames(physio2_brain) %in% rownames(datTraits_brain)
+
+datTraits_brain2 <- merge(datTraits_brain, physio2_brain, by=0)
+
+datTraits_brain2 <- datTraits_brain2[,c(1:16,35,47:52)]
+
+rownames(datTraits_brain2) <- datTraits_brain2$Row.names
+datTraits_brain2 <- datTraits_brain2[,c(2:ncol(datTraits_brain2))]
+
+```
+
+```{r}
+datTraits_brain2$CaM.mass <- as.numeric(datTraits_brain2$CaM.mass)
+datTraits_brain2$Log.Log.WAM.Mass.residuals <- as.numeric(datTraits_brain2$Log.Log.WAM.Mass.residuals)
+datTraits_brain2$CTMax.WAM.Mass.Residuals <- as.numeric(datTraits_brain2$CTMax.WAM.Mass.Residuals)
+datTraits_brain2$FA.CamMass.Residuals <- as.numeric(datTraits_brain2$FA.CamMass.Residuals)
+datTraits_brain2$GLU.CamMass.Residuals <- as.numeric(datTraits_brain2$GLU.CamMass.Residuals)
+datTraits_brain2$LKA..CamMass.Residuals <- as.numeric(datTraits_brain2$LKA..CamMass.Residuals)
+datTraits_brain2$END.CamMass.Residuals <- as.numeric(datTraits_brain2$END.CamMass.Residuals)
+datTraits_brain2$CaM.heart.mass.x <- as.numeric(datTraits_brain2$CaM.heart.mass.x)
+```
+
+```{r}
+# split CTMax and WAM by and heart mass and body mass by CaM temp
+# Add 12°C CTMax and WAM
+datTraits_brain2 <- mutate(datTraits_brain2, WAM_12=ifelse(Cam.Temp_12=="1", Log.Log.WAM.Mass.residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, CTMax_12=ifelse(Cam.Temp_12=="1", CTMax.WAM.Mass.Residuals, "NA"))
+
+# Add 28°C CTMax and WAM
+# Add 12°C CaM
+datTraits_brain2 <- mutate(datTraits_brain2, WAM_28=ifelse(Cam.Temp_12=="0", Log.Log.WAM.Mass.residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, CTMax_28=ifelse(Cam.Temp_12=="0", CTMax.WAM.Mass.Residuals, "NA"))
+
+# split heart mass
+datTraits_brain2 <- mutate(datTraits_brain2, HM_28=ifelse(Cam.Temp_12=="0", CaM.heart.mass.x, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, HM_12=ifelse(Cam.Temp_12=="1", CaM.heart.mass.x, "NA"))
+
+# split body mass
+datTraits_brain2 <- mutate(datTraits_brain2, body_mass_28=ifelse(Cam.Temp_12=="0", CaM.mass, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, body_mass_12=ifelse(Cam.Temp_12=="1", CaM.mass, "NA"))
+```
+
+```{r}
+# split CaM by by temp
+datTraits_brain2 <- mutate(datTraits_brain2, LKA_12=ifelse(Cam.Temp_12=="1", LKA..CamMass.Residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, FA_12=ifelse(Cam.Temp_12=="1", FA.CamMass.Residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, GLU_12=ifelse(Cam.Temp_12=="1", GLU.CamMass.Residuals, "NA"))
+
+datTraits_brain2<- mutate(datTraits_brain2, END_12=ifelse(Cam.Temp_12=="1", END.CamMass.Residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, LKA_28=ifelse(Cam.Temp_12=="0", LKA..CamMass.Residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, FA_28=ifelse(Cam.Temp_12=="0", FA.CamMass.Residuals, "NA"))
+
+datTraits_brain2 <- mutate(datTraits_brain2, GLU_28=ifelse(Cam.Temp_12=="0", GLU.CamMass.Residuals, "NA"))
+
+datTraits_brain2<- mutate(datTraits_brain2, END_28=ifelse(Cam.Temp_12=="0", END.CamMass.Residuals, "NA"))
+```
+
+```{r make numeric}
+datTraits_brain2$WAM_12 <- as.numeric(datTraits_brain2$WAM_12)
+datTraits_brain2$WAM_28 <- as.numeric(datTraits_brain2$WAM_28)
+
+datTraits_brain2$CTMax_12 <- as.numeric(datTraits_brain2$CTMax_12)
+datTraits_brain2$CTMax_28 <- as.numeric(datTraits_brain2$CTMax_28)
+
+datTraits_brain2$HM_12 <- as.numeric(datTraits_brain2$HM_12)
+datTraits_brain2$HM_28 <- as.numeric(datTraits_brain2$HM_28)
+
+datTraits_brain2$body_mass_12 <- as.numeric(datTraits_brain2$body_mass_12)
+datTraits_brain2$body_mass_28 <- as.numeric(datTraits_brain2$body_mass_28)
+
+datTraits_brain2$LKA_12 <- as.numeric(datTraits_brain2$LKA_12)
+datTraits_brain2$LKA_28 <- as.numeric(datTraits_brain2$LKA_28)
+
+datTraits_brain2$FA_12 <- as.numeric(datTraits_brain2$FA_12)
+datTraits_brain2$FA_28 <- as.numeric(datTraits_brain2$FA_28)
+
+datTraits_brain2$GLU_12 <- as.numeric(datTraits_brain2$GLU_12)
+datTraits_brain2$GLU_28 <- as.numeric(datTraits_brain2$GLU_28)
+
+datTraits_brain2$END_12 <- as.numeric(datTraits_brain2$END_12)
+datTraits_brain2$END_28 <- as.numeric(datTraits_brain2$END_28)
+
+```
+
+```{r recluster brain}
+# Re-cluster samples
+sampleTree2 = hclust(dist(brain_counts_t), method = "average")
+# Convert traits to a color representation: white means low, red means high, grey means missing entry
+traitColors = numbers2colors(datTraits_brain2[,6:39], signed = TRUE);
+# Plot the sample dendrogram and the colors underneath.
+plotDendroAndColors(sampleTree2, traitColors,
+groupLabels = names(datTraits_brain2),
+main = "Brain Sample dendrogram and trait heatmap")
+```
+
+```{r soft-thresholding power}
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=20, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(brain_counts_t, powerVector = powers, verbose = 5)
+# Plot the results:
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit,signed R^2",type="n",
+main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+```
+
+```{r }
+# choose threshold power that is lowest above 0.9
+softPower = 4
+adjacency_brain = adjacency(brain_counts_t, power = softPower)
+
+# Turn adjacency into topological overlap, to minimize effect of noise and spurrious associations
+TOM_brain = TOMsimilarity(adjacency_brain)
+dissTOM_brain = 1-TOM_brain
+```
+
+```{r}
+# Call the hierarchical clustering function
+geneTree = hclust(as.dist(dissTOM_brain), method = "average");
+# Plot the resulting clustering tree (dendrogram)
+sizeGrWindow(12,9)
+plot(geneTree, xlab="", sub="", main = "Gene clustering on TOM-based dissimilarity",
+labels = FALSE, hang = 0.04)
+
+```
+
+```{r trimming the tree}
+# We like large modules, so we set the minimum module size relatively high:
+minModuleSize = 30
+# Module identification using dynamic tree cut:
+dynamicMods = cutreeDynamic(dendro = geneTree, distM = dissTOM_brain,
+deepSplit = 2, pamRespectsDendro = FALSE,
+minClusterSize = minModuleSize)
+table(dynamicMods)
+
+#dynamicMods_brain <- dynamicMods
+```
+
+```{r view cut tree with modules colored}
+#geneTree_brain <- geneTree
+# Convert numeric lables into colors
+dynamicColors_brain = labels2colors(dynamicMods)
+table(dynamicColors_brain)
+# Plot the dendrogram and colors underneath
+sizeGrWindow(8,6)
+plotDendroAndColors(geneTree, dynamicColors_brain, "Dynamic Tree Cut",
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05,
+main = "Gene dendrogram and module colors")
+
+```
+
+```{r merge similar mods}
+# Calculate eigengenes
+MEList_brain = moduleEigengenes(brain_counts_t, colors = dynamicColors_brain)
+MEs_brain = MEList_brain$eigengenes
+# Calculate dissimilarity of module eigengenes
+MEDiss_brain = 1-cor(MEs_brain);
+# Cluster module eigengenes
+MEDiss_brain <- MEDiss_brain
+METree_brain = hclust(as.dist(MEDiss_brain), method = "average");
+# Plot the result
+sizeGrWindow(7, 6)
+plot(METree_brain, main = "Clustering of module eigengenes",
+xlab = "", sub = "")
+
+# correlation of at least 75% to merge
+MEDissThres_brain = 0.25
+# Plot the cut line into the dendrogram
+abline(h=MEDissThres_brain, col = "red")
+# Call an automatic merging function
+merge_brain = mergeCloseModules(brain_counts_t, dynamicColors_brain, cutHeight = MEDissThres_brain, verbose = 3)
+# The merged module colors
+mergedColors_brain = merge_brain$colors
+# Eigengenes of the new merged modules:
+mergedMEs_brain = merge_brain$newMEs
+```
+
+```{r}
+# look at new aligned colors -- none of the modules merged..
+plotDendroAndColors(geneTree, cbind(dynamicColors_brain, mergedColors_brain),
+c("Dynamic Tree Cut", "Merged dynamic"),
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05)
+```
+
+```{r}
+# Rename to moduleColors
+moduleColors_brain = mergedColors_brain
+# Construct numerical labels corresponding to the colors
+colorOrder_brain = c("grey", standardColors(50));
+moduleLabels_brain = match(moduleColors_brain, colorOrder_brain)-1;
+MEs_brain = mergedMEs_brain
+```
+
+
+```{r}
+# Define numbers of genes and samples
+nGenes_brain = ncol(brain_counts_t)
+nSamples_brain = nrow(brain_counts_t)
+# Recalculate MEs with color labels
+MEs0_brain = moduleEigengenes(brain_counts_t, moduleColors_brain)$eigengenes
+MEs_brain = orderMEs(MEs0_brain)
+MEs_brain <- MEs_brain[match(rownames(datTraits_brain2), rownames(MEs_brain)), ]
+moduleTraitCor_brain = cor(MEs_brain, datTraits_brain2[,6:39], use = "p")
+moduleTraitPvalue_brain = corPvalueStudent(moduleTraitCor_brain, nSamples_brain)
+
+#write.csv(moduleTraitCor_brain, "brain_WGCNA_cors.csv")
+```
+
+```{r}
+myheatcol = colorpanel(250,'red',"orange",'lemonchiffon')
+
+power=4
+color1=moduleColors_brain
+diss1=1-TOMsimilarityFromExpr(brain_counts_t, power = 4) 
+hier1=hclust(as.dist(diss1), method="average")
+diag(diss1) = NA;
+sizeGrWindow(7,7)
+TOMplot(diss1^4, hier1, as.character(color1),
+       main = "TOM heatmap plot brain, module genes", col=myheatcol)
+
+```
+
+
+```{r view gene trait correl}
+# Will display correlations and their p-values
+textMatrix_brain = paste(signif(moduleTraitCor_brain, 2), "(",
+signif(p.adjust(moduleTraitPvalue_brain, method="BH"), 1), ")", sep = "");
+dim(textMatrix_brain) = dim(moduleTraitCor_brain)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor_brain,
+xLabels = names(datTraits_brain2[,6:39]),
+yLabels = names(MEs_brain),
+ySymbols = names(MEs_brain),
+colorLabels = FALSE,
+colors = blueWhiteRed(50),
+textMatrix = textMatrix_brain,
+setStdMargins = FALSE,
+cex.text = 0.5,
+zlim = c(-1,1),
+main = paste("Module-trait relationships - Brain"))
+
+```
+Look at lists of singif modules for each trait
+```{r}
+mod_pval_df_brain <- as.data.frame(moduleTraitPvalue_brain)
+
+# multiple test correct
+mod_pval_df_brain$FA.CamMass.Residuals <- p.adjust(mod_pval_df_brain$FA.CamMass.Residuals, method="BH")
+
+mod_pval_df_brain$GLU.CamMass.Residuals <- p.adjust(mod_pval_df_brain$GLU.CamMass.Residuals, method="BH")
+
+mod_pval_df_brain$LKA..CamMass.Residuals <- p.adjust(mod_pval_df_brain$LKA..CamMass.Residuals, method="BH")
+
+mod_pval_df_brain$END.CamMass.Residuals <- p.adjust(mod_pval_df_brain$END.CamMass.Residuals, method="BH")
+
+mod_pval_df_brain$Log.Log.WAM.Mass.residuals<- p.adjust(mod_pval_df_brain$Log.Log.WAM.Mass.residuals, method="BH")
+
+mod_pval_df_brain$CTMax.WAM.Mass.Residuals <- p.adjust(mod_pval_df_brain$CTMax.WAM.Mass.Residuals, method="BH")
+
+mod_pval_df_brain$GLU_12 <- p.adjust(mod_pval_df_brain$GLU_12, method="BH")
+mod_pval_df_brain$GLU_28 <- p.adjust(mod_pval_df_brain$GLU_28, method="BH")
+
+mod_pval_df_brain$FA_12 <- p.adjust(mod_pval_df_brain$FA_12, method="BH")
+mod_pval_df_brain$FA_28 <- p.adjust(mod_pval_df_brain$FA_28, method="BH")
+
+mod_pval_df_brain$END_12 <- p.adjust(mod_pval_df_brain$END_12, method="BH")
+mod_pval_df_brain$END_28 <- p.adjust(mod_pval_df_brain$END_28, method="BH")
+
+mod_pval_df_brain$LKA_12 <- p.adjust(mod_pval_df_brain$LKA_12, method="BH")
+mod_pval_df_brain$LKA_28<- p.adjust(mod_pval_df_brain$LKA_28, method="BH")
+
+mod_pval_df_brain$WAM_12 <- p.adjust(mod_pval_df_brain$WAM_12, method="BH")
+mod_pval_df_brain$WAM_28 <- p.adjust(mod_pval_df_brain$WAM_28, method="BH")
+
+mod_pval_df_brain$CTMax_12 <- p.adjust(mod_pval_df_brain$CTMax_12, method="BH")
+mod_pval_df_brain$CTMax_28 <- p.adjust(mod_pval_df_brain$CTMax_28, method="BH")
+
+mod_pval_df_brain$HM_12 <- p.adjust(mod_pval_df_brain$HM_12, method="BH")
+mod_pval_df_brain$HM_28 <- p.adjust(mod_pval_df_brain$HM_28, method="BH")
+
+mod_pval_df_brain$body_mass_12 <- p.adjust(mod_pval_df_brain$body_mass_12, method="BH")
+mod_pval_df_brain$body_mass_28 <- p.adjust(mod_pval_df_brain$body_mass_28, method="BH")
+mod_pval_df_brain$CaM.mass <- p.adjust(mod_pval_df_brain$CaM.mass, method="BH")
+
+# heart mass
+signif_HM_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$CaM.heart.mass.x<0.05)
+signif_HM_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$HM_12<0.05)
+signif_HM_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$HM_28<0.05)
+
+# Fatty acids
+signif_FA_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$FA_12<0.05)
+signif_FA_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$FA_28<0.05)
+
+signif_FA_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$FA.CamMass.Residuals.x<0.05)
+
+# Glucose
+signif_Glu_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$GLU_12<0.05)
+signif_Glu_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$GLU_28 <0.05)
+signif_Glu_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$GLU.CamMass.Residuals.x <0.05)
+
+# LKA
+signif_LKA_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$LKA_12<0.05)
+signif_LKA_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$LKA_28 <0.05)
+signif_LKA_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$LKA..CamMass.Residuals.x <0.05)
+
+# END
+signif_END_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$END_12<0.05)
+signif_END_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$END_28 <0.05)
+signif_END_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$END.CamMass.Residuals.x <0.05)
+
+# CTMax
+signif_ctmax_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$CTMax_12 <0.05)
+signif_ctmax_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$CTMax_28  <0.05)
+signif_ctmax_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$CTMax.WAM.Mass.Residuals  <0.05)
+
+# WAM
+signif_wam_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$WAM_12 <0.05)
+signif_wam_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$WAM_28<0.05)
+signif_wam_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$Log.Log.WAM.Mass.residuals<0.05)
+
+# body mass
+signif_BM_12_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$body_mass_12 <0.05)
+signif_BM_28_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$body_mass_28<0.05)
+signif_BM_brain <- subset(rownames(mod_pval_df_brain), mod_pval_df_brain$CaM.mass<0.05)
+
+#write.csv(mod_pval_df_brain, "brain_WGCNA_pvals.csv")
+
+```
+
+```{r}
+# combine significant lists 
+
+signif_lists_brain <- as.list(c("signif_Glu_brain","signif_Glu_12_brain","signif_Glu_28_brain","signif_FA_brain","signif_FA_12_brain","signif_FA_28_brain","signif_LKA_brain","signif_LKA_12_brain","signif_LKA_28_brain","signif_END_brain","signif_END_12_brain","signif_END_28_brain", "signif_ctmax_brain","signif_ctmax_12_brain","signif_ctmax_28_brain","signif_wam_brain","signif_wam_12_brain","signif_wam_28_brain","signif_BM_brain","signif_BM_12_brain","signif_BM_28_brain"))
+
+signif_lists_brain <- gsub("'"," ",print(signif_lists_brain))
+
+l2 <- list(signif_Glu_brain,signif_Glu_12_brain,signif_Glu_28_brain,signif_FA_brain,signif_FA_12_brain,signif_FA_28_brain,signif_LKA_brain,signif_LKA_12_brain,signif_LKA_28_brain,signif_END_brain,signif_END_12_brain,signif_END_28_brain, signif_ctmax_brain,signif_ctmax_12_brain,signif_ctmax_28_brain,signif_wam_brain,signif_wam_12_brain,signif_wam_28_brain,signif_BM_brain,signif_BM_12_brain,signif_BM_28_brain)
+
+m2 <- matrix(unlist(l2), nrow = sum(lengths(l2)), ncol = length(l2))
+m2[!mapply(`%in%`, as.data.frame(m2), l2)] <- 0
+
+m2 <- as.data.frame(m2)
+colnames(m2) <- c("signif_Glu_brain","signif_Glu_12_brain","signif_Glu_28_brain","signif_FA_brain","signif_FA_12_brain","signif_FA_28_brain","signif_LKA_brain","signif_LKA_12_brain","signif_LKA_28_brain","signif_END_brain","signif_END_12_brain","signif_END_28_brain", "signif_ctmax_brain","signif_ctmax_12_brain","signif_ctmax_28_brain","signif_wam_brain","signif_wam_12_brain","signif_wam_28_brain","signif_BM_brain","signif_BM_12_brain","signif_BM_28_brain")
+
+signif_brain_WGCNA <- m2
+signif_brain_WGCNA
+
+#write.csv(signif_brain_WGCNA, "new_signif_brain_WGCNA.csv")
+```
+
+```{r}
+# see if any of these correlations actually look real...
+
+MEs_brain$sample_ID <- rownames(MEs_brain)
+datTraits_brain2_merge <- datTraits_brain2
+datTraits_brain2_merge$sample_ID <- rownames(datTraits_brain2)
+
+trait_MEs_brain <- left_join(MEs_brain, datTraits_brain2_merge, by="sample_ID")
+
+trait_MEs_brain_12 <- subset(trait_MEs_brain, trait_MEs_brain$Cam.Temp_12=="1")
+trait_MEs_brain_28 <- subset(trait_MEs_brain, trait_MEs_brain$Cam.Temp_12=="0")
+
+# add population column
+trait_MEs_brain_12_pop <- trait_MEs_brain_12 %>% 
+  mutate(Population = ifelse(Population_NOC=="1", "NOC", 
+                                ifelse(Population_SOC=="1", "SOC",
+                                       "TE")))
+
+trait_MEs_brain_28_pop <- trait_MEs_brain_28 %>% 
+  mutate(Population = ifelse(Population_NOC=="1", "NOC", 
+                                ifelse(Population_SOC=="1", "SOC",
+                                       "TE")))
+
+# plot
+ggplot(data=trait_MEs_brain_28, aes(y=FA_28, x=MEsaddlebrown)) +
+  geom_point() + theme_bw() + stat_smooth(method="lm") #+ xlim(values=c(-0.1,0.1))
+
+```
+
+# plot purple mod for brain
+```{r}
+# WAMand CTMax correlations with brian
+p6 <- ggplot(data=trait_MEs_brain_28, aes(x=MEpurple)) +
+    geom_point(aes(y=CTMax_28)) + 
+  stat_smooth(method="lm", aes(y=CTMax_28, color="CTMax_28"),alpha=1) +
+  labs(title = "Purple Module", y="CTMax 28°C", x="MEpurple") + theme_bw() +
+  scale_color_manual(values="purple")
+
+p7 <- ggplot(data=trait_MEs_brain_28, aes(x=MEorange)) +
+    geom_point(aes(y=CTMax_28)) + 
+  stat_smooth(method="lm", aes(y=CTMax_28, color="CTMax_28"), alpha=1) +
+  labs(title = "Orange Module", y="CTMax 28°C", x="MEorange") + theme_bw() +
+  scale_color_manual(values="orange")
+
+p8 <- ggplot(data=trait_MEs_brain_28, aes(x=MEviolet)) +
+    geom_point(aes(y=CTMax_28)) + 
+  stat_smooth(method="lm", aes(y=CTMax_28, color="CTMax_28"),alpha=1) +
+  labs(title = "Violet Module", y="CTMax 28°C", x="MEviolet") + theme_bw() +
+  scale_color_manual(values="violet")
+
+p9 <- ggplot(data=trait_MEs_brain_28, aes(x=MEviolet)) +
+    geom_point(aes(y=WAM_28)) + 
+  stat_smooth(method="lm", aes(y=WAM_28, color="WAM_28"),alpha=1) +
+  labs(title = "Violet Module", y="WAM 28°C", x="MEviolet") + theme_bw() +
+  scale_color_manual(values="violet")
+
+multiplot(p6, p8, p7, p9, cols=2)
+```
+
+```{r}
+# CaM correlations with brian
+p10 <- ggplot(data=trait_MEs_brain_28, aes(x=MEgreen)) +
+    geom_point(aes(y=FA_28)) + 
+  stat_smooth(method="lm", aes(y=FA_28, color="FA_28"),alpha=1) +
+  labs(title = "Green Module", y="FA 28°C", x="MEgreen") + theme_bw() +
+  scale_color_manual(values="green")
+
+p11 <- ggplot(data=trait_MEs_brain_28, aes(x=MEpurple)) +
+    geom_point(aes(y=FA_28)) + 
+  stat_smooth(method="lm", aes(y=FA_28, color="FA_28"), alpha=1) +
+  labs(title = "Purple Module", y="FA 28°C", x="MEpurple") + theme_bw() +
+  scale_color_manual(values="purple")
+
+p12 <- ggplot(data=trait_MEs_brain_28, aes(x=MEgreen)) +
+    geom_point(aes(y=GLU_28)) + 
+  stat_smooth(method="lm", aes(y=GLU_28, color="GLU_28"),alpha=1) +
+  labs(title = "Green Module", y="GLU 28°C", x="MEgreen") + theme_bw() +
+  scale_color_manual(values="green")
+
+multiplot(p10, p11, p12, cols=2)
+```
+
+```{r}
+# model residuals among populations - hearts 
+# FA 12
+FA_MEs_12 <- subset(traits_MEs_12_pop, traits_MEs_12$FA_12!="NA")
+
+FA_12vSB <- lm(data=traits_MEs_12, FA_12 ~ MEsaddlebrown)
+FA_MEs_12$FA_12vSB_res <- FA_12vSB$residuals
+summary(aov(FA_MEs_12$FA_12vSB_res~FA_MEs_12$Population))
+
+FA_12vSAL <- lm(data=traits_MEs_12, FA_12 ~ MEsalmon)
+FA_MEs_12$FA_12vSAL_res <- FA_12vSAL$residuals
+summary(aov(FA_MEs_12$FA_12vSAL_res~FA_MEs_12$Population))
+
+FA_12vLC <- lm(data=traits_MEs_12, FA_12 ~ MElightcyan)
+FA_MEs_12$FA_12vLC_res <- FA_12vLC$residuals
+summary(aov(FA_MEs_12$FA_12vLC_res~FA_MEs_12$Population))
+
+# LKA 12
+LKA_MEs_12 <- subset(traits_MEs_12_pop, traits_MEs_12$LKA_12!="NA")
+
+LKA_12vBl <- lm(data=traits_MEs_12, LKA_12 ~ MEblue)
+LKA_MEs_12$LKA_12vBl_res <- LKA_12vBl$residuals
+summary(aov(LKA_MEs_12$LKA_12vBl_res~LKA_MEs_12$Population))
+
+LKA_12vRed <- lm(data=traits_MEs_12, LKA_12 ~ MEred)
+LKA_MEs_12$LKA_12vRed_res <- LKA_12vRed$residuals
+summary(aov(LKA_MEs_12$LKA_12vRed_res~LKA_MEs_12$Population))
+
+# WAM 12
+WAM_MEs_12 <- subset(traits_MEs_12_pop, traits_MEs_12$WAM_12!="NA")
+
+WAM_12vDM <- lm(data=traits_MEs_12, WAM_12 ~ MEdarkmagenta)
+WAM_MEs_12$WAM_12vDM_res <- WAM_12vDM$residuals
+summary(aov(WAM_MEs_12$WAM_12vDM_res~WAM_MEs_12$Population))
+
+WAM_12vOR <- lm(data=traits_MEs_12, WAM_12 ~ MEorangered4)
+WAM_MEs_12$WAM_12vOR_res <- WAM_12vOR$residuals
+summary(aov(WAM_MEs_12$WAM_12vOR_res~WAM_MEs_12$Population))
+
+WAM_12vSB <- lm(data=traits_MEs_12, WAM_12 ~ MEsaddlebrown)
+WAM_MEs_12$WAM_12vSB_res <- WAM_12vSB$residuals
+summary(aov(WAM_MEs_12$WAM_12vSB_res~WAM_MEs_12$Population))
+
+WAM_12vSAL <- lm(data=traits_MEs_12, WAM_12 ~ MEsalmon)
+WAM_MEs_12$WAM_12vSAL_res <- WAM_12vSAL$residuals
+summary(aov(WAM_MEs_12$WAM_12vSAL_res~WAM_MEs_12$Population))
+
+# CTMax 12
+CTMax_MEs_12 <- subset(traits_MEs_12_pop, traits_MEs_12$CTMax_12!="NA")
+
+CTMax_12vtan <- lm(data=traits_MEs_12, CTMax_12 ~ MEtan)
+CTMax_MEs_12$CTMax_12vtan_res <- CTMax_12vtan$residuals
+summary(aov(CTMax_MEs_12$CTMax_12vtan_res~CTMax_MEs_12$Population))
+
+# CTMax 28
+CTMax_MEs_28 <- subset(traits_MEs_28_pop, traits_MEs_28$CTMax_28!="NA")
+
+CTMax_28vVI <- lm(data=traits_MEs_28, CTMax_28 ~ MEviolet)
+CTMax_MEs_28$CTMax_28vVI_res <- CTMax_28vVI$residuals
+summary(aov(CTMax_MEs_28$CTMax_28vVI_res~CTMax_MEs_28$Population))
+
+# HM 12
+HM_MEs_12 <- subset(traits_MEs_12_pop, traits_MEs_12$HM_12!="NA")
+
+HM_12vBl <- lm(data=traits_MEs_12, HM_12 ~ MEblue)
+HM_MEs_12$HM_12vBl_res <- HM_12vBl$residuals
+HM_12_aov <- aov(HM_MEs_12$HM_12vBl_res~HM_MEs_12$Population)
+TukeyHSD(HM_12_aov)
+
+ggplot(data=traits_MEs_12_pop, aes(x=MEblue)) +
+    geom_point(aes(y=HM_12, col=Population)) + 
+  stat_smooth(method="lm", aes(y=HM_12, color="HM_12"),alpha=0) +
+  labs(title = "Blue Module", y="HM 12°C", x="MEblue") + theme_bw() +
+  scale_color_manual(values=c("blue","blue","grey","red"))
+
+ggplot(HM_MEs_12, aes(x=Population, y=HM_12vBl_res)) +
+  geom_boxplot() +
+  theme_bw()
+```
+```{r}
+# are mRNAs diferentially expressed between pops within a temp also important for explaining trait variation? I.e. are MEs different among populations?
+# hearts - none significant 
+summary(aov(FA_MEs_12$MElightcyan ~ FA_MEs_12$Population))
+summary(aov(FA_MEs_12$MEsaddlebrown ~ FA_MEs_12$Population))
+summary(aov(FA_MEs_12$MEsalmon ~ FA_MEs_12$Population))
+
+summary(aov(CTMax_MEs_12$MEtan ~ CTMax_MEs_12$Population))
+
+summary(aov(CTMax_MEs_28$MEviolet ~ CTMax_MEs_28$Population))
+
+summary(aov(HM_MEs_12$MEblue ~ HM_MEs_12$Population))
+
+summary(aov(LKA_MEs_12$MEblue ~ LKA_MEs_12$Population))
+
+summary(aov(LKA_MEs_12$MEred ~ LKA_MEs_12$Population))
+
+summary(aov(WAM_MEs_12$MEdarkmagenta ~ WAM_MEs_12$Population))
+summary(aov(WAM_MEs_12$MEorangered4 ~ WAM_MEs_12$Population))
+summary(aov(WAM_MEs_12$MEsaddlebrown ~ WAM_MEs_12$Population))
+summary(aov(WAM_MEs_12$MEsalmon ~ WAM_MEs_12$Population))
+
+
+# brains - none significant 
+summary(aov(FA_brain_28$MEgreen ~ FA_brain_28$Population))
+summary(aov(FA_brain_28$MEpurple ~ FA_brain_28$Population))
+
+summary(aov(gl_brain_28$MEgreen ~ gl_brain_28$Population))
+
+summary(aov(WAM_brain_28$MEviolet ~ WAM_brain_28$Population))
+
+summary(aov(ct_brain_28$MEviolet ~ ct_brain_28$Population))
+summary(aov(ct_brain_28$MEpurple ~ ct_brain_28$Population))
+summary(aov(ct_brain_28$MEorange ~ ct_brain_28$Population))
+
+summary(aov(BM_brain_28$MEpurple ~ BM_brain_28$Population))
+
+summary(aov(BM_brain_12$MEpink ~ BM_brain_12$Population))
+
+# brain mods that explain CaM overlap with heart mods that explain CaM? ..little
+purple_mod %in% salmon_mod # 6 
+purple_mod %in% saddlebrown_mod # 5 
+purple_mod %in% lightcyan_mod #4 
+purple_mod %in% blue_mod # 10
+purple_mod %in% red_mod # 8
+
+green_mod %in% salmon_mod # 14
+green_mod %in% saddlebrown_mod # 5 
+green_mod %in% lightcyan_mod #4 
+green_mod %in% blue_mod # 12
+green_mod %in% red_mod # 7
+
+# brain mods that explain ctmax overlap with heart mods that explain ctmax?
+violet_mod_heart %in% violet_mod # 0
+violet_mod_heart %in% purple_mod # 1
+tan_mod %in% violet_mod # 6
+tan_mod %in% purple_mod # 9
+```
+```{r}
+# is brain correl. with CaM due to co-expression in heart and brain?
+hearts_shared_IDs <- subset(heart_meta2, heart_meta2$Fish.ID %in% brain_meta2$Fish.ID)
+nrow(hearts_shared_IDs) #16 out of 41
+
+greenmod_heartcounts <- subset(heart_counts2, rownames(heart_counts2) %in% green_mod)
+nrow(greenmod_heartcounts) # 117 out of 460
+
+purplemod_heartcounts <- subset(heart_counts2, rownames(heart_counts2) %in% purple_mod)
+nrow(purplemod_heartcounts) #103 out of 342
+
+green_PCA_heart <- prcomp(greenmod_heartcounts)
+green_PCA_heart.df <- as.data.frame(green_PCA_heart$rotation)
+
+
+purple_PCA_heart <- prcomp(purplemod_heartcounts)
+purple_PCA_heart.df <- as.data.frame(purple_PCA_heart$rotation)
+
+# green 12°C
+green_PCA_heart_keep <- subset(green_PCA_heart.df, rownames(green_PCA_heart.df) %in% FA_MEs_12$Row.names)
+green_PCA_heart_keep$Row.names <- rownames(green_PCA_heart_keep)
+FA_MEs_12_test <- merge(FA_MEs_12, green_PCA_heart_keep, by=c("Row.names"))
+FA_MEs_12_test <- subset(FA_MEs_12_test, FA_MEs_12_test$Row.names %in% rownames(hearts_shared_IDs))
+summary(lm(FA_MEs_12_test$FA_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$LKA_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$END_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$Glu_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$WAM_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$CTMax_12~FA_MEs_12_test$PC1))
+
+
+FA_MEs_28 <- subset(traits_MEs_28_pop, traits_MEs_28$FA_28!="NA")
+# green 28
+green_PCA_heart_keep28 <- subset(green_PCA_heart.df, rownames(green_PCA_heart.df) %in% FA_MEs_28$Row.names)
+green_PCA_heart_keep28$Row.names <- rownames(green_PCA_heart_keep28)
+FA_MEs_28_test <- merge(FA_MEs_28, green_PCA_heart_keep28, by=c("Row.names"))
+FA_MEs_28_test <- subset(FA_MEs_28_test, FA_MEs_28_test$Row.names %in% rownames(hearts_shared_IDs))
+summary(lm(FA_MEs_28_test$FA_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$LKA_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$END_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$Glu_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$WAM_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$CTMax_28~FA_MEs_28_test$PC1)) # signif 0.027
+
+
+# purple 12°C
+purple_PCA_heart_keep <- subset(purple_PCA_heart.df, rownames(purple_PCA_heart.df) %in% FA_MEs_12$Row.names)
+purple_PCA_heart_keep$Row.names <- rownames(purple_PCA_heart_keep)
+FA_MEs_12_test <- merge(FA_MEs_12, purple_PCA_heart_keep, by=c("Row.names"))
+FA_MEs_12_test <- subset(FA_MEs_12_test, FA_MEs_12_test$Row.names %in% rownames(hearts_shared_IDs))
+summary(lm(FA_MEs_12_test$FA_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$LKA_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$END_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$Glu_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$WAM_12~FA_MEs_12_test$PC1))
+summary(lm(FA_MEs_12_test$CTMax_12~FA_MEs_12_test$PC1))
+
+
+# purple 28
+purple_PCA_heart_keep28 <- subset(purple_PCA_heart.df, rownames(purple_PCA_heart.df) %in% FA_MEs_28$Row.names)
+purple_PCA_heart_keep28$Row.names <- rownames(purple_PCA_heart_keep28)
+FA_MEs_28_test <- merge(FA_MEs_28, purple_PCA_heart_keep28, by=c("Row.names"))
+FA_MEs_28_test <- subset(FA_MEs_28_test, FA_MEs_28_test$Row.names %in% rownames(hearts_shared_IDs))
+summary(lm(FA_MEs_28_test$FA_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$LKA_28~FA_MEs_28_test$PC1)) 
+summary(lm(FA_MEs_28_test$END_28~FA_MEs_28_test$PC1)) 
+summary(lm(FA_MEs_28_test$Glu_28~FA_MEs_28_test$PC1)) # signif p=0.021
+summary(lm(FA_MEs_28_test$WAM_28~FA_MEs_28_test$PC1))
+summary(lm(FA_MEs_28_test$CTMax_28~FA_MEs_28_test$PC1))
+
+# purple, negative 
+ggplot(FA_MEs_28_test, aes(x=Glu_28, y=PC1)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+green_PCA_heart_keep28 <- subset(green_PCA_heart.df, rownames(green_PCA_heart.df) %in% FA_MEs_28$Row.names)
+green_PCA_heart_keep28$Row.names <- rownames(green_PCA_heart_keep28)
+FA_MEs_28_test <- merge(FA_MEs_28, green_PCA_heart_keep28, by=c("Row.names"))
+FA_MEs_28_test <- subset(FA_MEs_28_test, FA_MEs_28_test$Row.names %in% rownames(hearts_shared_IDs))
+# green, negative 
+ggplot(FA_MEs_28_test, aes(x=CTMax_28, y=PC1)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+# are mRNA expression correlated between heart and brain?
+shared_fishIDs28 <- subset(brain_meta_28, brain_meta_28$Fish.ID %in% heart_meta_28$Fish.ID)
+
+brains_MEs_28 <- subset(MEs_brain, rownames(MEs_brain) %in% rownames(shared_fishIDs28))
+FA_MEs_28_test$Row.names
+
+rownames(brains_MEs_28)
+brains_MEs_28$FishID <- c("R3R5R6","G1R2P5","P3R4G6","R2O3O5","P2G3P6","G4G5R6","R2P5P6","R1O2P4")
+
+FA_MEs_28_test$FishID <- c("R1O2P4","P3R4G6","G1R2P5","P2G3P6","G4G5R6","R2P5P6","R2O3O5","R3R5R6")
+
+heart_brain_MEs <- merge(brains_MEs_28, FA_MEs_28_test, by="FishID")
+# .x = brainME, .y=heartME
+# green mod - p value = 0.992
+summary(lm(heart_brain_MEs$PC1~heart_brain_MEs$MEgreen.x))
+
+# purple mod = pvalue = 0.5565
+summary(lm(heart_brain_MEs$PC1~heart_brain_MEs$MEpurple.x))
+
+```
+
+
+
+```{r}
+# module residuals among populations - brain
+# FA28
+FA_brain_28 <- subset(trait_MEs_brain_28_pop, trait_MEs_brain_28_pop$FA_28!="NA")
+
+FA_28vPur <- lm(data=trait_MEs_brain_28, FA_28 ~ MEpurple)
+FA_brain_28$FA_28vPur_res <- FA_28vPur$residuals
+summary(aov(FA_brain_28$FA_28vPur_res~FA_brain_28$Population))
+
+FA_28vGr <- lm(data=trait_MEs_brain_28, FA_28 ~ MEgreen)
+FA_brain_28$FA_28vGr_res <- FA_28vGr$residuals
+summary(aov(FA_brain_28$FA_28vGr_res~FA_brain_28$Population))
+
+# CTMax 28 
+ct_brain_28 <- subset(trait_MEs_brain_28_pop, trait_MEs_brain_28_pop$CTMax_28!="NA")
+
+ct_28vPur <- lm(data=trait_MEs_brain_28, CTMax_28 ~ MEpurple)
+ct_brain_28$ct_28vPur_res <- ct_28vPur$residuals
+summary(aov(ct_brain_28$ct_28vPur_res~ct_brain_28$Population))
+
+ct_28vVI <- lm(data=trait_MEs_brain_28, CTMax_28 ~ MEviolet)
+ct_brain_28$ct_28vVI_res <- ct_28vVI$residuals
+summary(aov(ct_brain_28$ct_28vVI_res~ct_brain_28$Population))
+
+ct_28vOR <- lm(data=trait_MEs_brain_28, CTMax_28 ~ MEorange)
+ct_brain_28$ct_28vOR_res <- ct_28vOR$residuals
+summary(aov(ct_brain_28$ct_28vOR_res~ct_brain_28$Population))
+
+# GLU 28
+gl_brain_28 <- subset(trait_MEs_brain_28_pop, trait_MEs_brain_28_pop$GLU_28!="NA")
+
+gl_28vGr <- lm(data=trait_MEs_brain_28, GLU_28 ~ MEgreen)
+gl_brain_28$gl_28vGr_res <- gl_28vGr$residuals
+summary(aov(gl_brain_28$gl_28vGr_res~gl_brain_28$Population))
+
+# WAM 28
+WAM_brain_28 <- subset(trait_MEs_brain_28_pop, trait_MEs_brain_28_pop$WAM_28!="NA")
+
+WAM_28vVI <- lm(data=trait_MEs_brain_28, WAM_28 ~ MEviolet)
+WAM_brain_28$WAM_28vVI_res <- WAM_28vVI$residuals
+summary(aov(WAM_brain_28$WAM_28vVI_res~WAM_brain_28$Population))
+
+# BM 12
+BM_brain_12 <- subset(trait_MEs_brain_12_pop, trait_MEs_brain_12_pop$body_mass_12!="NA")
+
+BM_12vpi <- lm(data=trait_MEs_brain_12, body_mass_12 ~ MEpink)
+BM_brain_12$BM_12vpi_res <- BM_12vpi$residuals
+summary(aov(BM_brain_12$BM_12vpi_res~BM_brain_12$Population))
+
+# BM 28
+BM_brain_28 <- subset(trait_MEs_brain_28_pop, trait_MEs_brain_28_pop$body_mass_28!="NA")
+
+BM_28vpu <- lm(data=trait_MEs_brain_28, body_mass_28 ~ MEpurple)
+BM_brain_28$BM_28vpu_res <- BM_28vpu$residuals
+summary(aov(BM_brain_28$BM_28vpu_res~BM_brain_28$Population))
+```
+
+```{r, multivariate trait explanations}
+# multivariate trait explanations
+traits_MEs_12
+# heart 0.7958768
+FA_12_sum <- lm(data=traits_MEs_12, FA_12 ~ MElightcyan+ MEsaddlebrown + MEsalmon)
+cor(FA_12_sum$model$FA_12, FA_12_sum$fitted.values)
+
+# 0.7549586
+LKA_12_sum <- lm(data=traits_MEs_12, LKA_12 ~ MEblue + MEred)
+cor(LKA_12_sum$model$LKA_12, LKA_12_sum$fitted.values)
+
+# 0.8181913
+WAM_12_sum <- lm(data=traits_MEs_12, WAM_12 ~ MEorangered4 + MEsaddlebrown + MEsalmon + MEdarkmagenta)
+cor(WAM_12_sum$model$WAM_12, WAM_12_sum$fitted.values)
+
+# 66.7 (0.6666792)
+WAM_12_sum2 <- lm(data=traits_MEs_12, WAM_12 ~ MEsaddlebrown + MEsalmon)
+cor(WAM_12_sum2$model$WAM_12, WAM_12_sum2$fitted.values)
+
+# same modules with FA #0.6714585
+FA_12_sum2 <- lm(data=traits_MEs_12, FA_12 ~ MEsaddlebrown + MEsalmon)
+cor(FA_12_sum2$model$FA_12, FA_12_sum2$fitted.values)
+
+# brain
+FA_28_sum <- lm(data=trait_MEs_brain_28, FA_28 ~ MEpurple + MEgreen)
+cor(FA_28_sum$model$FA_28, FA_28_sum$fitted.values)
+
+CTMax_28_sum <- lm(data=trait_MEs_brain_28, CTMax_28 ~ MEpurple + MEviolet + MEorange)
+cor(CTMax_28_sum$model$CTMax_28, CTMax_28_sum$fitted.values)
+
+```
+
+# Save data for each significant trait 
+```{r brain save per gene MM and p-value lists}
+# Define variable -- body mass 12
+BM_12 = as.data.frame(datTraits_brain2$body_mass_12);
+names(BM_12) = "BM_12"
+# names (colors) of the modules
+modNames = substring(names(MEs_brain), 3)
+geneModuleMembership = as.data.frame(cor(brain_counts_t, MEs_brain, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(brain_counts_t, BM_12, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(BM_12), sep="")
+names(GSPvalue) = paste("p.GS.", names(BM_12), sep="")
+
+# Save data for brain body mass 12
+gene_ids_wgcna = names(brain_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors_brain,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs_brain, BM_12, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.BM_12));
+geneInfo = geneInfo0[geneOrder, ]
+
+pink_data <- subset(geneInfo, geneInfo$moduleColor=="pink")
+pink_data[order(-abs(pink_data$MM.pink)),]
+pink_data[order(-abs(pink_data$GS.BM_12)),]
+
+#write.csv(geneInfo, file = "brain_bm12_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- body mass 28
+BM_28 = as.data.frame(datTraits_brain2$body_mass_28);
+names(BM_28) = "BM_28"
+# names (colors) of the modules
+modNames = substring(names(MEs_brain), 3)
+geneModuleMembership = as.data.frame(cor(brain_counts_t, MEs_brain, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(brain_counts_t, BM_28, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(BM_28), sep="")
+names(GSPvalue) = paste("p.GS.", names(BM_28), sep="")
+
+# Save data for body masss 28
+gene_ids_wgcna = names(brain_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors_brain,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs_brain, BM_28, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.BM_28));
+geneInfo = geneInfo0[geneOrder, ]
+
+purple_data <- subset(geneInfo, geneInfo$moduleColor=="purple")
+purple_data[order(-abs(purple_data$MM.purple)),]
+purple_data[order(-abs(purple_data$GS.BM_28)),]
+
+#write.csv(geneInfo, file = "brain_bm28_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- CTMax 28
+CTMax_28 = as.data.frame(datTraits_brain2$CTMax_28);
+names(CTMax_28) = "CTMax_28"
+# names (colors) of the modules
+modNames = substring(names(MEs_brain), 3)
+geneModuleMembership = as.data.frame(cor(brain_counts_t, MEs_brain, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(brain_counts_t, CTMax_28, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(CTMax_28), sep="")
+names(GSPvalue) = paste("p.GS.", names(CTMax_28), sep="")
+
+# Save data for CTMax 28
+gene_ids_wgcna = names(brain_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors_brain,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs_brain, CTMax_28, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.CTMax_28));
+geneInfo = geneInfo0[geneOrder, ]
+
+violet_data <- subset(geneInfo, geneInfo$moduleColor=="violet")
+violet_data[order(-abs(violet_data$MM.violet)),]
+violet_data[order(-abs(violet_data$GS.CTMax_28)),]
+
+purple_data <- subset(geneInfo, geneInfo$moduleColor=="purple")
+purple_data[order(-abs(purple_data$MM.purple)),]
+purple_data[order(-abs(purple_data$GS.CTMax_28)),]
+
+orange_data <- subset(geneInfo, geneInfo$moduleColor=="orange")
+orange_data[order(-abs(orange_data$MM.orange)),]
+orange_data[order(-abs(orange_data$GS.CTMax_28)),]
+
+#write.csv(geneInfo, file = "brain_ctmax28_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- FA Metabolism 28
+FA_28 = as.data.frame(datTraits_brain2$FA_28);
+names(FA_28) = "FA_28"
+# names (colors) of the modules
+modNames = substring(names(MEs_brain), 3)
+geneModuleMembership = as.data.frame(cor(brain_counts_t, MEs_brain, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(brain_counts_t, FA_28, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(FA_28), sep="")
+names(GSPvalue) = paste("p.GS.", names(FA_28), sep="")
+
+# Save data for CaM FA 28
+gene_ids_wgcna = names(brain_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors_brain,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs_brain, FA_28, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.FA_28));
+geneInfo = geneInfo0[geneOrder, ]
+
+green_data <- subset(geneInfo, geneInfo$moduleColor=="green")
+green_data[order(-abs(green_data$MM.green)),]
+green_data[order(-abs(green_data$GS.FA_28)),]
+
+purple_data <- subset(geneInfo, geneInfo$moduleColor=="purple")
+purple_data[order(-abs(purple_data$MM.purple)),]
+purple_data[order(-abs(purple_data$GS.FA_28)),]
+
+#write.csv(geneInfo, file = "brain_FA28_CaM_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# Define variable -- Glu 28
+GLU_28 = as.data.frame(datTraits_brain2$GLU_28);
+names(GLU_28) = "GLU_28"
+# names (colors) of the modules
+modNames = substring(names(MEs_brain), 3)
+geneModuleMembership = as.data.frame(cor(brain_counts_t, MEs_brain, use = "p"));
+MMPvalue = as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(brain_counts_t, GLU_28, use = "p"))
+GSPvalue = as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(GLU_28), sep="")
+names(GSPvalue) = paste("p.GS.", names(GLU_28), sep="")
+
+# Save data for CaM GLU 28
+gene_ids_wgcna = names(brain_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors_brain,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs_brain, GLU_28, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.GLU_28));
+geneInfo = geneInfo0[geneOrder, ]
+
+green_data <- subset(geneInfo, geneInfo$moduleColor=="green")
+green_data[order(-abs(green_data$MM.green)),]
+green_data[order(-abs(green_data$GS.GLU_28)),]
+
+#write.csv(geneInfo, file = "brain_GLU28_CaM_WGCNA_geneInfo_signed.csv")
+```
+
+
+```{r}
+# Define variable -- WAM 28
+WAM_28 = as.data.frame(datTraits_brain2$WAM_28);
+names(WAM_28) = "WAM_28"
+# names (colors) of the modules
+modNames = substring(names(MEs_brain), 3)
+geneModuleMembership = as.data.frame(cor(brain_counts_t, MEs_brain, use = "p"));
+MMPvalue = as.data.frame(WGCNA::corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+names(geneModuleMembership) = paste("MM", modNames, sep="")
+names(MMPvalue) = paste("p.MM", modNames, sep="")
+geneTraitSignificance = as.data.frame(cor(brain_counts_t, WAM_28, use = "p"))
+GSPvalue = as.data.frame(WGCNA::corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+names(geneTraitSignificance) = paste("GS.", names(WAM_28), sep="")
+names(GSPvalue) = paste("p.GS.", names(WAM_28), sep="")
+
+# Save data for CaM FA
+gene_ids_wgcna = names(brain_counts_t)
+
+# Create the starting data frame
+geneInfo0 = data.frame(wgcna_genes = gene_ids_wgcna,
+moduleColor = moduleColors_brain,
+geneTraitSignificance,
+GSPvalue)
+# Order modules by their significance for weight
+modOrder = order(-abs(cor(MEs_brain, WAM_28, use = "p")));
+# Add module membership information in the chosen order
+for (mod in 1:ncol(geneModuleMembership))
+{
+oldNames = names(geneInfo0)
+geneInfo0 = data.frame(geneInfo0, geneModuleMembership[, modOrder[mod]],
+MMPvalue[, modOrder[mod]]);
+names(geneInfo0) = c(oldNames, paste("MM.", modNames[modOrder[mod]], sep=""),
+paste("p.MM.", modNames[modOrder[mod]], sep=""))
+}
+# Order the genes in the geneInfo variable first by module color, then by geneTraitSignificance
+geneOrder = order(geneInfo0$moduleColor, -abs(geneInfo0$GS.WAM_28));
+geneInfo = geneInfo0[geneOrder, ]
+
+violet_data <- subset(geneInfo, geneInfo$moduleColor=="violet")
+violet_data[order(-abs(violet_data$MM.violet)),]
+violet_data[order(-abs(violet_data$GS.WAM_28)),]
+
+#write.csv(geneInfo, file = "brain_WAM28_WGCNA_geneInfo_signed.csv")
+```
+
+```{r}
+# lists for brain enrichment
+pink_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="pink"))
+purple_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="purple"))
+orange_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="orange"))
+violet_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="violet"))
+green_mod <- rownames(subset(geneInfo, geneInfo$moduleColor=="green"))
+
+# uppercase everything
+pink_mod <- lapply(pink_mod, function(x) toupper(x))
+pink_mod <- as.character(pink_mod)
+
+purple_mod <- lapply(purple_mod, function(x) toupper(x))
+purple_mod <- as.character(purple_mod)
+
+orange_mod <- lapply(orange_mod, function(x) toupper(x))
+orange_mod <- as.character(orange_mod)
+
+violet_mod <- lapply(violet_mod, function(x) toupper(x))
+violet_mod <- as.character(violet_mod)
+
+green_mod <- lapply(green_mod, function(x) toupper(x))
+green_mod <- as.character(green_mod)
+
+```
+
+```{r}
+# format lists of terms for KEGG enrichment test
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_ko) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_ko, sep = ",") -> column_kegg
+
+emapper_annot %>% dplyr::select(Preferred_name, KEGG_Pathway) %>%
+  mutate_all(na_if,"") %>% 
+  drop_na() %>% 
+  tidyr::separate_rows(KEGG_Pathway, sep = ",") -> column_kegg_path
+
+column_go$term  <- column_go$GOs
+column_go$gene <- column_go$Preferred_name
+column_go <- column_go[,3:4]
+
+column_kegg$term  <- column_kegg$KEGG_ko
+column_kegg$gene <- column_kegg$Preferred_name
+column_kegg <- column_kegg[,3:4]
+
+column_kegg_path$term  <- column_kegg_path$KEGG_Pathway
+column_kegg_path$gene <- column_kegg_path$Preferred_name
+column_kegg_path <- column_kegg_path[,3:4]
+
+# pull out background set to map
+all_mRNAs_brain <- colnames(brain_counts_t)
+
+# annotate just these
+all_mRNAs_upper <- lapply(all_mRNAs_brain, function(x) toupper(x))
+all_mRNAs_upper  <- as.character(all_mRNAs_upper)
+
+# library(clusterProfiler)
+green_kegg <- enricher(green_mod, universe=all_mRNAs_upper, TERM2GENE = column_kegg, minGSSize = 1, maxGSSize=1000, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+green_keggpath <- enricher(green_mod, universe=all_mRNAs_upper, TERM2GENE = column_kegg_path, minGSSize = 1, maxGSSize=1000, pvalueCutoff = 0.05, pAdjustMethod = "BH")
+
+#write.csv(green_mod, "brain_green.txt")
+
+#write.csv(all_mRNAs_upper, "background_ref_funhe_brain.csv")
+#write.csv(green_kegg, "brain_green_kegg.csv")
+```
+
+#####################################################################
+# Correlation between genes among phenotypes
+```{r individual correlations}
+# data has been previously filtered to keep only genes with >-30 counts in 90% of individuals
+heart_data <- as.data.frame(heart_counts_t)
+# merge
+heart_data$sample.ID <- rownames(heart_data)
+physio_hearts <- subset(physio, physio$tissue == "heart")
+physio_hearts <- subset(physio_hearts, physio_hearts$CaM.mass!=" ")
+heart_comb <- left_join(heart_data, physio_hearts, by="sample.ID")
+
+# want columns 1:22670 to be in lm with 22701-22707 (loglogwam_res, CaM_res (FA, Glu, LKA, END), CTMax_res)
+
+# data has been previously filtered to keep only genes with >-30 counts in 90% of individuals
+brain_data <- as.data.frame(brain_counts_t)
+# merge
+brain_data$sample.ID <- rownames(brain_data)
+physio_brains <- subset(physio, physio$tissue == "brain")
+physio_brains <- subset(physio_brains, physio_brains$CaM.mass!=" ")
+brain_comb <- left_join(brain_data, physio_brains, by="sample.ID")
+
+# want columns 1:22883 to be in lm with 22914-22919
+
+# fix odd characters in gene names (_ and - and : replaced with .) so we can paste names 
+colnames(heart_comb) <- lapply(colnames(heart_comb), function(x) {
+  gsub("_", ".", x)
+  })
+colnames(heart_comb) <- lapply(colnames(heart_comb), function(x) {
+  gsub("-", ".", x)
+  })
+colnames(heart_comb) <- lapply(colnames(heart_comb), function(x) {
+  gsub(":", ".", x)
+  })
+colnames(heart_comb) <- lapply(colnames(heart_comb), function(x) {
+  gsub("/", ".", x)
+  })
+
+colnames(brain_comb) <- lapply(colnames(brain_comb), function(x) {
+  gsub("_", ".", x)
+  })
+colnames(brain_comb) <- lapply(colnames(brain_comb), function(x) {
+  gsub("-", ".", x)
+  })
+colnames(brain_comb) <- lapply(colnames(brain_comb), function(x) {
+  gsub(":", ".", x)
+  })
+
+```
+
+```{r}
+heart_genes <- colnames(heart_comb[,1:10535])
+Vars <- as.list(heart_genes)
+heart_comb$Log.Log.WAM.Mass.residuals <- as.numeric(heart_comb$Log.Log.WAM.Mass.residuals)
+heart_comb$FA.CamMass.Residuals <- as.numeric(heart_comb$FA.CamMass.Residuals)
+heart_comb$LKA..CamMass.Residuals <- as.numeric(heart_comb$LKA..CamMass.Residuals)
+heart_comb$GLU.CamMass.Residuals <- as.numeric(heart_comb$GLU.CamMass.Residuals)
+heart_comb$END.CamMass.Residuals <- as.numeric(heart_comb$END.CamMass.Residuals)
+heart_comb$CTMax.WAM.Mass.Residuals <- as.numeric(heart_comb$CTMax.WAM.Mass.Residuals)
+heart_comb$Cam.Temp <- as.factor(heart_comb$Cam.Temp)
+heart_comb$Acclimation.Temp <- as.factor(heart_comb$Aclclimation.Temp)
+
+heart_comb_test <- heart_comb %>%
+  mutate(FA_12=ifelse(Cam.Temp=="12", FA.CamMass.Residuals,"NA")) %>%
+  mutate(FA_28=ifelse(Cam.Temp=="28", FA.CamMass.Residuals, "NA"))
+```
+
+```{r}
+WAM_heartModelsList <- lapply(gsub(" ", "", paste("Log.Log.WAM.Mass.residuals ~ Cam.Temp*", paste("`"),Vars,paste("`"))), as.formula)
+WAM_heartModelsResults <- lapply(WAM_heartModelsList, function(x) lm(x, data = heart_comb))  
+allModelsSummaries = lapply(WAM_heartModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+wam_Pvals_mrna <-matrix(NA,10535,1)
+wam_Pvals_temp <-matrix(NA,10535,1)
+
+for (i in 1:10535) { 
+  wam_Pvals_mrna[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[3,4], error=function(e) print(NA))
+  wam_Pvals_temp[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+wam_Pvals_mrna <- as.data.frame(wam_Pvals_mrna)
+wam_Pvals_mrna$gene_num <- rownames(wam_Pvals_mrna)
+wam_Pvals_mrna$FDR <- p.adjust(wam_Pvals_mrna$V1, method="fdr")
+
+wam_Pvals_temp <- as.data.frame(wam_Pvals_temp)
+wam_Pvals_temp$gene_num <- rownames(wam_Pvals_temp)
+wam_Pvals_temp$FDR <- p.adjust(wam_Pvals_temp$V1, method="fdr")
+#5440 genes significant (w accl temp in model), 1390 with Cam.Temp in model, 0 have significant gene*temp interaction (888 with Cam.Temp interaction)
+wam_heart_sign_mrna <- subset(wam_Pvals_mrna, wam_Pvals_mrna$V1 <0.05) # 837
+wam_heart_sign_temp <- subset(wam_Pvals_temp, wam_Pvals_temp$V1 <0.05) #589
+
+#4466  genes remain significant (0 with Cam.Temp in model), none remain with significant interaction (0 remain significant with Cam.Temp interation)
+wam_heart_sign_FDR_mrna <- subset(wam_Pvals_mrna, wam_Pvals_mrna$FDR < 0.05) #0
+wam_heart_sign_FDR_temp <- subset(wam_Pvals_temp, wam_Pvals_temp$FDR < 0.05) #0 
+
+```
+
+```{r}
+FA_CaM_heartModelsList <- lapply(gsub(" ", "", paste("FA.CamMass.Residuals ~ Cam.Temp*", paste("`"),Vars,paste("`"))), as.formula)
+FA_CaM_heartModelsResults <- lapply(FA_CaM_heartModelsList, function(x) lm(x, data = heart_comb))  
+allModelsSummaries = lapply(FA_CaM_heartModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+FA_CaM_heart_Pvals <-matrix(NA,10535,1)
+FA_CaM_heart_Pvals_temp <-matrix(NA,10535,1)
+
+for (i in 1:10535) { 
+  FA_CaM_heart_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[3,4], error=function(e) print(NA))
+  FA_CaM_heart_Pvals_temp[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+
+}
+FA_CaM_heart_Pvals <- as.data.frame(FA_CaM_heart_Pvals)
+FA_CaM_heart_Pvals$gene_num <- rownames(FA_CaM_heart_Pvals)
+FA_CaM_heart_Pvals$FDR <- p.adjust(FA_CaM_heart_Pvals$V1, method="fdr")
+
+FA_CaM_heart_Pvals_temp <- as.data.frame(FA_CaM_heart_Pvals_temp)
+FA_CaM_heart_Pvals_temp$gene_num <- rownames(FA_CaM_heart_Pvals_temp)
+FA_CaM_heart_Pvals_temp$FDR <- p.adjust(FA_CaM_heart_Pvals_temp$V1, method="fdr")
+# 3255 genes, 1192 interactions
+FA_CaM_heart_sign <- subset(FA_CaM_heart_Pvals, FA_CaM_heart_Pvals$V1 <0.05) #1648
+FA_CaM_heart_sign_temp <- subset(FA_CaM_heart_Pvals_temp, FA_CaM_heart_Pvals_temp$V1 <0.05) #749
+
+# 29 genes remain significant, 0 significant interactions
+FA_CaM_heart_sign_FDR <- subset(FA_CaM_heart_Pvals, FA_CaM_heart_Pvals$FDR < 0.05) #82
+FA_CaM_heart_sign_FDR_temp <- subset(FA_CaM_heart_Pvals_temp, FA_CaM_heart_Pvals_temp$FDR < 0.05) #2
+
+```
+```{r}
+FA_CaM_heartModelsList_28 <- lapply(gsub(" ", "", paste("FA_28 ~", paste("`"),Vars,paste("`"))), as.formula)
+
+heart_comb_28 <- subset(heart_comb_test, heart_comb_test$FA_28!="NA")
+heart_comb_28$FA_28 <- as.numeric(heart_comb_28$FA_28)
+
+FA_CaM_heartModelsResults_28 <- lapply(FA_CaM_heartModelsList_28, function(x) lm(x, data = heart_comb_28))  
+allModelsSummaries = lapply(FA_CaM_heartModelsResults_28, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+FA_CaM_heart_Pvals_28 <-matrix(NA,10535,1)
+
+for (i in 1:10535) { 
+  FA_CaM_heart_Pvals_28[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[2,4], error=function(e) print(NA))
+}
+
+FA_CaM_heart_Pvals_28 <- as.data.frame(FA_CaM_heart_Pvals_28)
+FA_CaM_heart_Pvals_28$gene_num <- rownames(FA_CaM_heart_Pvals_28)
+FA_CaM_heart_Pvals_28$FDR <- p.adjust(FA_CaM_heart_Pvals_28$V1, method="fdr")
+
+# 516 genes
+FA_CaM_heart_sign_28 <- subset(FA_CaM_heart_Pvals_28, FA_CaM_heart_Pvals_28$V1 <0.05) 
+
+# 0 genes remain significant
+FA_CaM_heart_sign_FDR_28 <- subset(FA_CaM_heart_Pvals_28, FA_CaM_heart_Pvals_28$FDR < 0.05) #82
+
+FA_CaM_heart_Pvals_28_df <- as.data.frame(FA_CaM_heart_Pvals_28)
+signif_FA_28_list <- subset(Vars_df, Vars_df$gene_num %in% FA_CaM_heart_sign_28$gene_num)
+
+subset(signif_FA_28_list, signif_FA_28_list %in% green_mod)
+subset(signif_FA_28_list, signif_FA_28_list %in% purple_mod)
+
+ggplot(heart_comb_28, aes(x=LOC105931220, y=FA_28)) +
+  geom_point() +
+  geom_smooth(method="lm") +
+  theme_bw()
+
+# green shared LOC105917114, LOC105917463, LOC105928657, LOC105928748, LOC105931220 (right dir)
+# purple shared LOC105918954, LOC105928560
+```
+
+```{r}
+Glu_CaM_heartModelsList <- lapply(gsub(" ", "", paste("GLU.CamMass.Residuals  ~ Cam.Temp*", paste("`"),Vars,paste("`"))), as.formula)
+Glu_CaM_heartModelsResults <- lapply(Glu_CaM_heartModelsList, function(x) lm(x, data = heart_comb))  
+allModelsSummaries = lapply(Glu_CaM_heartModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+Glu_CaM_heart_Pvals <-matrix(NA,10535,1)
+Glu_CaM_heart_Pvals_temp <-matrix(NA,10535,1)
+for (i in 1:10535) { 
+  Glu_CaM_heart_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[3,4], error=function(e) print(NA))
+  Glu_CaM_heart_Pvals_temp[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+Glu_CaM_heart_Pvals <- as.data.frame(Glu_CaM_heart_Pvals)
+Glu_CaM_heart_Pvals$gene_num <- rownames(Glu_CaM_heart_Pvals)
+Glu_CaM_heart_Pvals$FDR <- p.adjust(Glu_CaM_heart_Pvals$V1, method="fdr")
+
+Glu_CaM_heart_Pvals_temp <- as.data.frame(Glu_CaM_heart_Pvals_temp)
+Glu_CaM_heart_Pvals_temp$gene_num <- rownames(Glu_CaM_heart_Pvals_temp)
+Glu_CaM_heart_Pvals_temp$FDR <- p.adjust(Glu_CaM_heart_Pvals_temp$V1, method="fdr")
+# 1453 genes, 1071 significant interactions
+Glu_CaM_heart_sign <- subset(Glu_CaM_heart_Pvals, Glu_CaM_heart_Pvals$V1 <0.05) #705
+Glu_CaM_heart_sign_temp <- subset(Glu_CaM_heart_Pvals_temp, Glu_CaM_heart_Pvals_temp$V1 <0.05) #633
+
+# 327 genes remain significant, 63 significant interactions
+Glu_CaM_heart_sign_FDR <- subset(Glu_CaM_heart_Pvals, Glu_CaM_heart_Pvals$FDR < 0.05) #68
+Glu_CaM_heart_sign_FDR_temp <- subset(Glu_CaM_heart_Pvals_temp, Glu_CaM_heart_Pvals_temp$FDR < 0.05) #6
+
+```
+
+```{r}
+LKA_CaM_heartModelsList <- lapply(gsub(" ", "", paste("LKA..CamMass.Residuals  ~ Cam.Temp*", paste("`"),Vars,paste("`"))), as.formula)
+LKA_CaM_heartModelsResults <- lapply(LKA_CaM_heartModelsList, function(x) lm(x, data = heart_comb))  
+allModelsSummaries = lapply(LKA_CaM_heartModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+LKA_CaM_heart_Pvals <-matrix(NA,10535,1)
+LKA_CaM_heart_Pvals_temp <-matrix(NA,10535,1)
+
+for (i in 1:10535) { 
+  LKA_CaM_heart_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[3,4], error=function(e) print(NA))
+  LKA_CaM_heart_Pvals_temp[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+LKA_CaM_heart_Pvals <- as.data.frame(LKA_CaM_heart_Pvals)
+LKA_CaM_heart_Pvals$gene_num <- rownames(LKA_CaM_heart_Pvals)
+LKA_CaM_heart_Pvals$FDR <- p.adjust(LKA_CaM_heart_Pvals$V1, method="fdr")
+
+LKA_CaM_heart_Pvals_temp <- as.data.frame(LKA_CaM_heart_Pvals_temp)
+LKA_CaM_heart_Pvals_temp$gene_num <- rownames(LKA_CaM_heart_Pvals_temp)
+LKA_CaM_heart_Pvals_temp$FDR <- p.adjust(LKA_CaM_heart_Pvals_temp$V1, method="fdr")
+# 869 genes, 789 significant interactions
+LKA_CaM_heart_sign <- subset(LKA_CaM_heart_Pvals, LKA_CaM_heart_Pvals$V1 <0.05) #596
+LKA_CaM_heart_sign_temp <- subset(LKA_CaM_heart_Pvals_temp, LKA_CaM_heart_Pvals_temp$V1 <0.05) #520
+
+# 0 genes, 0 interactions
+LKA_CaM_heart_sign_FDR <- subset(LKA_CaM_heart_Pvals, LKA_CaM_heart_Pvals$FDR < 0.05) #0
+LKA_CaM_heart_sign_FDR_temp <- subset(LKA_CaM_heart_Pvals_temp, LKA_CaM_heart_Pvals_temp$FDR < 0.05) #0
+
+```
+
+```{r}
+END_CaM_heartModelsList <- lapply(gsub(" ", "", paste("END.CamMass.Residuals  ~ Cam.Temp*", paste("`"),Vars,paste("`"))), as.formula)
+END_CaM_heartModelsResults <- lapply(END_CaM_heartModelsList, function(x) lm(x, data = heart_comb))  
+allModelsSummaries = lapply(END_CaM_heartModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+END_CaM_heart_Pvals <-matrix(NA,10535,1)
+END_CaM_heart_Pvals_temp <-matrix(NA,10535,1)
+
+for (i in 1:10535) { 
+  END_CaM_heart_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[3,4], error=function(e) print(NA))
+  END_CaM_heart_Pvals_temp[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+END_CaM_heart_Pvals <- as.data.frame(END_CaM_heart_Pvals)
+END_CaM_heart_Pvals$gene_num <- rownames(END_CaM_heart_Pvals)
+END_CaM_heart_Pvals$FDR <- p.adjust(END_CaM_heart_Pvals$V1, method="fdr")
+
+END_CaM_heart_Pvals_temp <- as.data.frame(END_CaM_heart_Pvals_temp)
+END_CaM_heart_Pvals_temp$gene_num <- rownames(END_CaM_heart_Pvals_temp)
+END_CaM_heart_Pvals_temp$FDR <- p.adjust(END_CaM_heart_Pvals_temp$V1, method="fdr")
+# 1754 genes, 922 interactions
+END_CaM_heart_sign <- subset(END_CaM_heart_Pvals, END_CaM_heart_Pvals$V1 <0.05) #955
+END_CaM_heart_sign_temp <- subset(END_CaM_heart_Pvals_temp, END_CaM_heart_Pvals_temp$V1 <0.05) #495
+
+# 1 gene remains, 0 significant interactions
+END_CaM_heart_sign_FDR <- subset(END_CaM_heart_Pvals, END_CaM_heart_Pvals$FDR < 0.05) #3
+END_CaM_heart_sign_FDR_temp <- subset(END_CaM_heart_Pvals_temp, END_CaM_heart_Pvals_temp$FDR < 0.05) #0
+
+```
+
+```{r}
+CTMax_CaM_heartModelsList <- lapply(gsub(" ", "", paste("CTMax.WAM.Mass.Residuals ~ Cam.Temp*", paste("`"),Vars,paste("`"))), as.formula)
+CTMax_CaM_heartModelsResults <- lapply(CTMax_CaM_heartModelsList, function(x) lm(x, data = heart_comb))  
+allModelsSummaries = lapply(CTMax_CaM_heartModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+CTMax_heart_Pvals <-matrix(NA,10535,1)
+CTMax_heart_Pvals_temp <-matrix(NA,10535,1)
+
+for (i in 1:10535) { 
+  CTMax_heart_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[3,4], error=function(e) print(NA))
+  CTMax_heart_Pvals_temp[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+
+}
+CTMax_heart_Pvals <- as.data.frame(CTMax_heart_Pvals)
+CTMax_heart_Pvals$gene_num <- rownames(CTMax_heart_Pvals)
+CTMax_heart_Pvals$FDR <- p.adjust(CTMax_heart_Pvals$V1, method="fdr")
+
+CTMax_heart_Pvals_temp <- as.data.frame(CTMax_heart_Pvals_temp)
+CTMax_heart_Pvals_temp$gene_num <- rownames(CTMax_heart_Pvals_temp)
+CTMax_heart_Pvals_temp$FDR <- p.adjust(CTMax_heart_Pvals_temp$V1, method="fdr")
+
+# 2907genes, 1241 interactions
+CTMax_heart_sign <- subset(CTMax_heart_Pvals, CTMax_heart_Pvals$V1 <0.05) #1317
+CTMax_heart_sign_temp <- subset(CTMax_heart_Pvals_temp, CTMax_heart_Pvals_temp$V1 <0.05) #679
+
+# 2 genes remain, no significant interactions
+CTMax_heart_sign_FDR <- subset(CTMax_heart_Pvals, CTMax_heart_Pvals$FDR < 0.05) #4
+CTMax_heart_sign_FDR_temp <- subset(CTMax_heart_Pvals_temp, CTMax_heart_Pvals_temp$FDR < 0.05) #0
+
+```
+
+```{r}
+# summarize LM results
+lm_summary <- matrix(NA, 12,2)
+
+lm_summary[,1] <- c(nrow(CTMax_heart_sign), nrow(wam_heart_sign_mrna), nrow(FA_CaM_heart_sign), nrow(LKA_CaM_heart_sign), nrow(END_CaM_heart_sign), nrow(Glu_CaM_heart_sign),nrow(CTMax_heart_sign_FDR), nrow(wam_heart_sign_FDR_mrna), nrow(FA_CaM_heart_sign_FDR), nrow(LKA_CaM_heart_sign_FDR), nrow(END_CaM_heart_sign_FDR), nrow(Glu_CaM_heart_sign_FDR))
+
+lm_summary[,2] <- c("CTMax", "WAM", "FA", "LKA", "END", "GLU","CTMax_fdr", "WAM_fdr", "FA_fdr", "LKA_fdr", "END_fdr", "GLU_fdr")
+
+lm_summary <- as.data.frame(lm_summary)
+lm_summary$V1 <- as.numeric(lm_summary$V1)
+lm_summary$trait <- lm_summary$V2
+lm_summary$num_correlations <- lm_summary$V1
+ggplot(lm_summary, aes(x=trait, y=num_correlations, fill=trait)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  ylab("Number of Significant Correlations") +
+  xlab("Trait")
+
+```
+
+```{r}
+# Save list of genes w/ signif correlations
+#FA_heart_genes <- FA_CaM_heart_sign_FDR$gene_num
+#FA_heart_genes <-as.numeric(as.character(FA_heart_genes))
+
+#FA_heart_genes_list<-heart_comb[,FA_heart_genes]
+#FA_heart_genes_save <- colnames(FA_heart_genes_list)
+
+#LKA_heart_genes <- LKA_CaM_heart_sign_FDR$gene_num
+#LKA_heart_genes <-as.numeric(as.character(LKA_heart_genes))
+
+#LKA_heart_genes_list<-heart_comb[,LKA_heart_genes]
+#LKA_heart_genes_save <- colnames(LKA_heart_genes_list)
+
+#FA_LKA_hearts_shared <- Reduce(intersect, list(LKA_heart_genes_save, FA_heart_genes_save)) 
+
+
+#write.csv(FA_heart_genes_save, "FA_heart_signif_correl.csv")
+#write.csv(LKA_heart_genes_save, "LKA_heart_signif_correl.csv")
+
+```
+
+# repeat for brains
+```{r}
+brain_genes <- colnames(brain_comb[,1:22883])
+Vars2 <- as.list(brain_genes)
+brain_comb$Log.Log.WAM.Mass.residuals <- as.numeric(brain_comb$Log.Log.WAM.Mass.residuals)
+brain_comb$FA.CamMass.Residuals <- as.numeric(brain_comb$FA.CamMass.Residuals)
+brain_comb$LKA..CamMass.Residuals <- as.numeric(brain_comb$LKA..CamMass.Residuals)
+brain_comb$GLU.CamMass.Residuals <- as.numeric(brain_comb$GLU.CamMass.Residuals)
+brain_comb$END.CamMass.Residuals <- as.numeric(brain_comb$END.CamMass.Residuals)
+brain_comb$CTMax.WAM.Mass.Residuals <- as.numeric(brain_comb$CTMax.WAM.Mass.Residuals)
+brain_comb$Cam.Temp <- as.factor(brain_comb$Cam.Temp)
+brain_comb$Acclimation.Temp <- as.factor(brain_comb$Aclclimation.Temp)
+```
+
+```{r}
+WAM_brainModelsList <- lapply(gsub(" ", "", paste("Log.Log.WAM.Mass.residuals ~ Cam.Temp*", paste("`"),Vars2,paste("`"))), as.formula)
+WAM_brainModelsResults <- lapply(WAM_brainModelsList, function(x) lm(x, data = brain_comb))  
+allModelsSummaries = lapply(WAM_brainModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+wam_Pvals <-matrix(NA,22883,1)
+for (i in 1:22883) { 
+  wam_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+wam_Pvals <- as.data.frame(wam_Pvals)
+wam_Pvals$gene_num <- rownames(wam_Pvals)
+wam_Pvals$FDR <- p.adjust(wam_Pvals$V1, method="fdr")
+#928 genes significant (w accl temp in model), 1390 with Cam.Temp in model, 0 have significant gene*temp interaction (888 with Cam.Temp interaction)
+wam_brain_sign <- subset(wam_Pvals, wam_Pvals$V1 <0.05)
+#0  genes remain significant (0 with Cam.Temp in model), none remain with significant interaction (0 remain significant with Cam.Temp interation)
+wam_brain_sign_FDR <- subset(wam_Pvals, wam_Pvals$FDR < 0.05)
+```
+
+```{r}
+FA_CaM_brainModelsList <- lapply(gsub(" ", "", paste("FA.CamMass.Residuals ~ Cam.Temp*", paste("`"),Vars2,paste("`"))), as.formula)
+FA_CaM_brainModelsResults <- lapply(FA_CaM_brainModelsList, function(x) lm(x, data = brain_comb))  
+allModelsSummaries = lapply(FA_CaM_brainModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+FA_CaM_brain_Pvals <-matrix(NA,22883,1)
+for (i in 1:22883) { 
+  FA_CaM_brain_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+FA_CaM_brain_Pvals <- as.data.frame(FA_CaM_brain_Pvals)
+FA_CaM_brain_Pvals$gene_num <- rownames(FA_CaM_brain_Pvals)
+FA_CaM_brain_Pvals$FDR <- p.adjust(FA_CaM_brain_Pvals$V1, method="fdr")
+# 3255 genes, 1192 interactions
+FA_CaM_brain_sign <- subset(FA_CaM_brain_Pvals, FA_CaM_brain_Pvals$V1 <0.05)
+# 29 genes remain significant, 0 significant interactions
+FA_CaM_brain_sign_FDR <- subset(FA_CaM_brain_Pvals, FA_CaM_brain_Pvals$FDR < 0.05)
+```
+
+```{r}
+Glu_CaM_brainModelsList <- lapply(gsub(" ", "", paste("GLU.CamMass.Residuals  ~ Cam.Temp*", paste("`"),Vars2,paste("`"))), as.formula)
+Glu_CaM_brainModelsResults <- lapply(Glu_CaM_brainModelsList, function(x) lm(x, data = brain_comb))  
+allModelsSummaries = lapply(Glu_CaM_brainModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+Glu_CaM_brain_Pvals <-matrix(NA,22883,1)
+for (i in 1:22883) { 
+  Glu_CaM_brain_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+Glu_CaM_brain_Pvals <- as.data.frame(Glu_CaM_brain_Pvals)
+Glu_CaM_brain_Pvals$gene_num <- rownames(Glu_CaM_brain_Pvals)
+Glu_CaM_brain_Pvals$FDR <- p.adjust(Glu_CaM_brain_Pvals$V1, method="fdr")
+# 1453 genes, 1071 significant interactions
+Glu_CaM_brain_sign <- subset(Glu_CaM_brain_Pvals, Glu_CaM_brain_Pvals$V1 <0.05)
+# 327 genes remain significant, 63 significant interactions
+Glu_CaM_brain_sign_FDR <- subset(Glu_CaM_brain_Pvals, Glu_CaM_brain_Pvals$FDR < 0.05)
+```
+
+```{r}
+LKA_CaM_brainModelsList <- lapply(gsub(" ", "", paste("LKA..CamMass.Residuals  ~ Cam.Temp*", paste("`"),Vars2,paste("`"))), as.formula)
+LKA_CaM_brainModelsResults <- lapply(LKA_CaM_brainModelsList, function(x) lm(x, data = brain_comb))  
+allModelsSummaries = lapply(LKA_CaM_brainModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+LKA_CaM_brain_Pvals <-matrix(NA,22883,1)
+for (i in 1:22883) { 
+  LKA_CaM_brain_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+LKA_CaM_brain_Pvals <- as.data.frame(LKA_CaM_brain_Pvals)
+LKA_CaM_brain_Pvals$gene_num <- rownames(LKA_CaM_brain_Pvals)
+LKA_CaM_brain_Pvals$FDR <- p.adjust(LKA_CaM_brain_Pvals$V1, method="fdr")
+# 869 genes, 789 significant interactions
+LKA_CaM_brain_sign <- subset(LKA_CaM_brain_Pvals, LKA_CaM_brain_Pvals$V1 <0.05)
+# 0 genes, 0 interactions
+LKA_CaM_brain_sign_FDR <- subset(LKA_CaM_brain_Pvals, LKA_CaM_brain_Pvals$FDR < 0.05)
+```
+
+```{r}
+END_CaM_brainModelsList <- lapply(gsub(" ", "", paste("END.CamMass.Residuals  ~ Cam.Temp*", paste("`"),Vars2,paste("`"))), as.formula)
+END_CaM_brainModelsResults <- lapply(END_CaM_brainModelsList, function(x) lm(x, data = brain_comb))  
+allModelsSummaries = lapply(END_CaM_brainModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+END_CaM_brain_Pvals <-matrix(NA,22883,1)
+for (i in 1:22883) { 
+  END_CaM_brain_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+END_CaM_brain_Pvals <- as.data.frame(END_CaM_brain_Pvals)
+END_CaM_brain_Pvals$gene_num <- rownames(END_CaM_brain_Pvals)
+END_CaM_brain_Pvals$FDR <- p.adjust(END_CaM_brain_Pvals$V1, method="fdr")
+# 1754 genes, 922 interactions
+END_CaM_brain_sign <- subset(END_CaM_brain_Pvals, END_CaM_brain_Pvals$V1 <0.05)
+# 1 gene remains, 0 significant interactions
+END_CaM_brain_sign_FDR <- subset(END_CaM_brain_Pvals, END_CaM_brain_Pvals$FDR < 0.05)
+```
+
+```{r}
+CTMax_CaM_brainModelsList <- lapply(gsub(" ", "", paste("CTMax.WAM.Mass.Residuals ~ Cam.Temp*", paste("`"),Vars2,paste("`"))), as.formula)
+CTMax_CaM_brainModelsResults <- lapply(CTMax_CaM_brainModelsList, function(x) lm(x, data = brain_comb))  
+allModelsSummaries = lapply(CTMax_CaM_brainModelsResults, summary)
+
+# coefficient 3,4 is gene significance, coefficient 2,4 is temp significance, coefficient 4,4 is interaction term significance
+CTMax_brain_Pvals <-matrix(NA,22883,1)
+for (i in 1:22883) { 
+  CTMax_brain_Pvals[i,1] <- tryCatch(allModelsSummaries[[i]]$coefficients[4,4], error=function(e) print(NA))
+}
+CTMax_brain_Pvals <- as.data.frame(CTMax_brain_Pvals)
+CTMax_brain_Pvals$gene_num <- rownames(CTMax_brain_Pvals)
+CTMax_brain_Pvals$FDR <- p.adjust(CTMax_brain_Pvals$V1, method="fdr")
+# 2907genes, 1241 interactions
+CTMax_brain_sign <- subset(CTMax_brain_Pvals, CTMax_brain_Pvals$V1 <0.05)
+# 2 genes remain, no significant interactions
+CTMax_brain_sign_FDR <- subset(CTMax_brain_Pvals, CTMax_brain_Pvals$FDR < 0.05)
+```
+
+
+```{r}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+  require(grid)
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+```
